@@ -36,6 +36,10 @@ export const envSchema = z.object({
     .int()
     .positive()
     .default(50 * 1024 * 1024),
+  /** Signs access tokens. At least 32 random characters: openssl rand -base64 48 */
+  JWT_SECRET: z.string().min(32, 'must be at least 32 characters'),
+  ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().min(60).default(900),
+  REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().min(1).default(30),
   CORS_ORIGINS: z
     .string()
     .default('http://localhost:5173')

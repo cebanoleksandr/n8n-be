@@ -13,7 +13,6 @@ import type { Page } from '../../common/pagination.js';
 import type { BinaryRef, JsonObject } from '../../engine/types.js';
 import { JOB_RUN, type RunJobData, WORKFLOW_QUEUE } from '../../queue/queue.js';
 import { ExecutionEventsService } from '../events/execution-events.service.js';
-import { DEFAULT_WORKSPACE_ID } from '../workspaces/default-workspace.js';
 import { WorkflowsService } from '../workflows/workflows.service.js';
 import { ExecutionStep } from './execution-step.entity.js';
 import {
@@ -44,7 +43,6 @@ export interface StartExecutionOptions {
 @Injectable()
 export class ExecutionsService {
   private readonly logger = new Logger(ExecutionsService.name);
-  private readonly workspaceId = DEFAULT_WORKSPACE_ID;
 
   constructor(
     @InjectRepository(Execution)
@@ -58,10 +56,14 @@ export class ExecutionsService {
 
   /** Creates a queued execution of the workflow's current version. */
   async start(
+    workspaceId: string,
     workflowId: string,
     options: StartExecutionOptions,
   ): Promise<Execution> {
-    const { workflow, version } = await this.workflows.getForRun(workflowId);
+    const { workflow, version } = await this.workflows.getForRun(
+      workspaceId,
+      workflowId,
+    );
     const execution = await this.executions.save(
       this.executions.create({
         workspaceId: workflow.workspaceId,
@@ -109,7 +111,11 @@ export class ExecutionsService {
    * Waits until the execution finishes or `timeoutMs` passes, then returns its
    * current state (which may still be queued/running after a timeout).
    */
-  async waitForFinish(id: string, timeoutMs: number): Promise<ExecutionDto> {
+  async waitForFinish(
+    workspaceId: string,
+    id: string,
+    timeoutMs: number,
+  ): Promise<ExecutionDto> {
     let unsubscribe: (() => void) | undefined;
     let timer: NodeJS.Timeout | undefined;
     try {
@@ -136,17 +142,17 @@ export class ExecutionsService {
       clearTimeout(timer);
       unsubscribe?.();
     }
-    return this.get(id);
+    return this.get(workspaceId, id);
   }
 
   /**
    * Queued runs are canceled directly; running ones get a cancel request over
    * Redis that the worker holding them acts on. Waits briefly for the result.
    */
-  async cancel(id: string): Promise<ExecutionDto> {
+  async cancel(workspaceId: string, id: string): Promise<ExecutionDto> {
     const execution = await this.executions.findOneBy({
       id,
-      workspaceId: this.workspaceId,
+      workspaceId,
     });
     if (!execution) throw new NotFoundException(`Execution ${id} not found`);
     if (isFinished(execution.status)) {
@@ -174,16 +180,19 @@ export class ExecutionsService {
         error,
         finishedAt: finishedAt.toISOString(),
       });
-      return this.get(id);
+      return this.get(workspaceId, id);
     }
     await this.events.requestCancel(id);
-    return this.waitForFinish(id, CANCEL_WAIT_MS);
+    return this.waitForFinish(workspaceId, id, CANCEL_WAIT_MS);
   }
 
-  async list(query: ListExecutionsQuery): Promise<Page<ExecutionSummaryDto>> {
+  async list(
+    workspaceId: string,
+    query: ListExecutionsQuery,
+  ): Promise<Page<ExecutionSummaryDto>> {
     const [items, total] = await this.executions.findAndCount({
       where: {
-        workspaceId: this.workspaceId,
+        workspaceId,
         ...(query.workflowId && { workflowId: query.workflowId }),
         ...(query.status && { status: query.status }),
       },
@@ -194,10 +203,10 @@ export class ExecutionsService {
     return { items: items.map(toSummary), total };
   }
 
-  async get(id: string): Promise<ExecutionDto> {
+  async get(workspaceId: string, id: string): Promise<ExecutionDto> {
     const execution = await this.executions.findOneBy({
       id,
-      workspaceId: this.workspaceId,
+      workspaceId,
     });
     if (!execution) throw new NotFoundException(`Execution ${id} not found`);
     const steps = await this.steps.find({

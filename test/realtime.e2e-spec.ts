@@ -14,7 +14,10 @@ describe('Realtime execution events (e2e)', () => {
 
   beforeAll(async () => {
     t = await createTestApp();
-    socket = io(`${t.url}/executions`, { transports: ['websocket'] });
+    socket = io(`${t.url}/executions`, {
+      transports: ['websocket'],
+      auth: { token: t.owner.token },
+    });
     await new Promise<void>((resolve, reject) => {
       socket.once('connect', resolve);
       socket.once('connect_error', reject);

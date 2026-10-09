@@ -3,6 +3,7 @@ import { ApiExcludeController } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import type { BinaryRef, JsonObject } from '../../engine/types.js';
 import { normalizeWebhookPath } from '../../nodes/core/webhook.node.js';
+import { Public } from '../auth/auth.decorators.js';
 import { BinaryDataModule } from '../binary-data/binary-data.module.js';
 import { BinaryDataService } from '../binary-data/binary-data.service.js';
 import { ExecutionsModule } from '../executions/executions.module.js';
@@ -16,6 +17,7 @@ const RESPONSE_TIMEOUT_MS = 30_000;
 
 /** Public entry point for Webhook trigger nodes: ANY /webhook/<path>. */
 @ApiExcludeController()
+@Public()
 @Controller('webhook')
 export class WebhooksController {
   constructor(
@@ -43,13 +45,14 @@ export class WebhooksController {
       return;
     }
 
+    const workspaceId = webhook.workflow!.workspaceId;
     // Files are stored before the execution exists and linked to it afterwards.
     const files = await receiveFiles(req, res, this.binaryData.maxBytes);
     const binary: Record<string, BinaryRef> = {};
     for (const file of files) {
       binary[file.field] = await this.binaryData.put(
         {
-          workspaceId: webhook.workflow!.workspaceId,
+          workspaceId,
           workflowId: webhook.workflowId,
         },
         file.data,
@@ -57,20 +60,24 @@ export class WebhooksController {
       );
     }
 
-    const execution = await this.executions.start(webhook.workflowId, {
-      mode: 'webhook',
-      startNodeId: webhook.nodeId,
-      input: [
-        {
-          method: req.method,
-          path,
-          headers: req.headers as JsonObject,
-          query: req.query as JsonObject,
-          body: (req.body ?? null) as JsonObject,
-        },
-      ],
-      binary: files.length > 0 ? [binary] : undefined,
-    });
+    const execution = await this.executions.start(
+      workspaceId,
+      webhook.workflowId,
+      {
+        mode: 'webhook',
+        startNodeId: webhook.nodeId,
+        input: [
+          {
+            method: req.method,
+            path,
+            headers: req.headers as JsonObject,
+            query: req.query as JsonObject,
+            body: (req.body ?? null) as JsonObject,
+          },
+        ],
+        binary: files.length > 0 ? [binary] : undefined,
+      },
+    );
     if (files.length > 0) {
       await this.binaryData.linkExecution(
         Object.values(binary).map((b) => b.id),
@@ -84,6 +91,7 @@ export class WebhooksController {
     }
 
     const result = await this.executions.waitForFinish(
+      workspaceId,
       execution.id,
       RESPONSE_TIMEOUT_MS,
     );

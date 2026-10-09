@@ -216,12 +216,16 @@ export class ExecutionExecutor
       await this.queue.removeJobScheduler(schedulerId(workflowId, nodeId));
       return;
     }
-    const execution = await this.executionsService.start(workflowId, {
-      mode: 'schedule',
-      startNodeId: nodeId,
-      input: [{ timestamp: new Date().toISOString() }],
-      enqueue: false,
-    });
+    const execution = await this.executionsService.start(
+      workflow.workspaceId,
+      workflowId,
+      {
+        mode: 'schedule',
+        startNodeId: nodeId,
+        input: [{ timestamp: new Date().toISOString() }],
+        enqueue: false,
+      },
+    );
     await this.execute(execution.id);
   }
 
@@ -332,11 +336,15 @@ export class ExecutionExecutor
         },
         workflow: { id: workflow.id, name: workflow.name },
       };
-      await this.executionsService.start(errorWorkflowId, {
-        mode: 'error',
-        startNodeId: trigger.id,
-        input: [JSON.parse(JSON.stringify(payload)) as JsonObject],
-      });
+      await this.executionsService.start(
+        workflow.workspaceId,
+        errorWorkflowId,
+        {
+          mode: 'error',
+          startNodeId: trigger.id,
+          input: [JSON.parse(JSON.stringify(payload)) as JsonObject],
+        },
+      );
     } catch (err) {
       this.logger.error(
         `Failed to start error workflow ${errorWorkflowId}`,

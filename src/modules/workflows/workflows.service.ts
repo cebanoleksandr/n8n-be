@@ -13,7 +13,6 @@ import type { WorkflowGraph } from '../../engine/types.js';
 import type { Page, Pagination } from '../../common/pagination.js';
 import type { Env } from '../../config/env.js';
 import { TriggersService } from '../triggers/triggers.service.js';
-import { DEFAULT_WORKSPACE_ID } from '../workspaces/default-workspace.js';
 import { WorkflowVersion } from './workflow-version.entity.js';
 import { Workflow, type WorkflowSettings } from './workflow.entity.js';
 import type {
@@ -26,9 +25,6 @@ import type {
 
 @Injectable()
 export class WorkflowsService {
-  // TODO: take the workspace from the authenticated user once auth exists.
-  private readonly workspaceId = DEFAULT_WORKSPACE_ID;
-
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     @InjectRepository(Workflow)
@@ -40,9 +36,12 @@ export class WorkflowsService {
     private readonly config: ConfigService<Env, true>,
   ) {}
 
-  async list({ limit, offset }: Pagination): Promise<Page<WorkflowSummaryDto>> {
+  async list(
+    workspaceId: string,
+    { limit, offset }: Pagination,
+  ): Promise<Page<WorkflowSummaryDto>> {
     const [items, total] = await this.workflows.findAndCount({
-      where: { workspaceId: this.workspaceId },
+      where: { workspaceId },
       order: { updatedAt: 'DESC' },
       take: limit,
       skip: offset,
@@ -50,19 +49,22 @@ export class WorkflowsService {
     return { items: items.map(toSummary), total };
   }
 
-  async get(id: string): Promise<WorkflowDto> {
-    const workflow = await this.findOrFail(id);
+  async get(workspaceId: string, id: string): Promise<WorkflowDto> {
+    const workflow = await this.findOrFail(workspaceId, id);
     const version = await this.currentVersion(workflow);
     return toDto(workflow, version);
   }
 
-  async create(dto: CreateWorkflowDto): Promise<WorkflowDto> {
+  async create(
+    workspaceId: string,
+    dto: CreateWorkflowDto,
+  ): Promise<WorkflowDto> {
     const graph = dto.graph ?? EMPTY_GRAPH;
     this.assertValid(graph);
     return this.dataSource.transaction(async (em) => {
       const workflow = await em.save(
         em.create(Workflow, {
-          workspaceId: this.workspaceId,
+          workspaceId,
           name: dto.name,
           active: false,
           settings: {},
@@ -73,12 +75,16 @@ export class WorkflowsService {
     });
   }
 
-  async update(id: string, dto: UpdateWorkflowDto): Promise<WorkflowDto> {
+  async update(
+    workspaceId: string,
+    id: string,
+    dto: UpdateWorkflowDto,
+  ): Promise<WorkflowDto> {
     if (dto.graph) this.assertValid(dto.graph);
     return this.dataSource.transaction(async (em) => {
       // Lock the row so concurrent saves cannot claim the same version number.
       const workflow = await em.findOne(Workflow, {
-        where: { id, workspaceId: this.workspaceId },
+        where: { id, workspaceId },
         lock: { mode: 'pessimistic_write' },
       });
       if (!workflow) throw new NotFoundException(`Workflow ${id} not found`);
@@ -113,18 +119,21 @@ export class WorkflowsService {
     });
   }
 
-  async remove(id: string): Promise<void> {
+  async remove(workspaceId: string, id: string): Promise<void> {
     const result = await this.workflows.delete({
       id,
-      workspaceId: this.workspaceId,
+      workspaceId,
     });
     if (!result.affected)
       throw new NotFoundException(`Workflow ${id} not found`);
     await this.triggers.removeSchedulers(id);
   }
 
-  async listVersions(id: string): Promise<WorkflowVersionDto[]> {
-    await this.findOrFail(id);
+  async listVersions(
+    workspaceId: string,
+    id: string,
+  ): Promise<WorkflowVersionDto[]> {
+    await this.findOrFail(workspaceId, id);
     return this.versions.find({
       select: { id: true, version: true, createdAt: true },
       where: { workflowId: id },
@@ -134,16 +143,17 @@ export class WorkflowsService {
 
   /** Used by executions: the workflow and the version to run. */
   async getForRun(
+    workspaceId: string,
     id: string,
   ): Promise<{ workflow: Workflow; version: WorkflowVersion }> {
-    const workflow = await this.findOrFail(id);
+    const workflow = await this.findOrFail(workspaceId, id);
     return { workflow, version: await this.currentVersion(workflow) };
   }
 
-  private async findOrFail(id: string): Promise<Workflow> {
+  private async findOrFail(workspaceId: string, id: string): Promise<Workflow> {
     const workflow = await this.workflows.findOneBy({
       id,
-      workspaceId: this.workspaceId,
+      workspaceId,
     });
     if (!workflow) throw new NotFoundException(`Workflow ${id} not found`);
     return workflow;
@@ -206,7 +216,7 @@ export class WorkflowsService {
       }
       const target = await em.findOneBy(Workflow, {
         id: patch.errorWorkflowId,
-        workspaceId: this.workspaceId,
+        workspaceId: workflow.workspaceId,
       });
       if (!target) {
         throw new BadRequestException(

@@ -14,7 +14,8 @@ export function configureApp(
   });
   // Workflow graphs and run inputs can exceed the 100kb default.
   app.useBodyParser('json', { limit: '5mb' });
-  app.enableCors({ origin: corsOrigins });
+  // credentials: the refresh token is an httpOnly cookie.
+  app.enableCors({ origin: corsOrigins, credentials: true });
   app.useWebSocketAdapter(new CorsIoAdapter(app, corsOrigins));
   app.enableShutdownHooks();
 }

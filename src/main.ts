@@ -37,7 +37,8 @@ async function bootstrap() {
     app,
     new DocumentBuilder()
       .setTitle('Flow Platform API')
-      .setVersion('0.2')
+      .setVersion('0.3')
+      .addBearerAuth()
       .build(),
   );
   SwaggerModule.setup('docs', app, document, {

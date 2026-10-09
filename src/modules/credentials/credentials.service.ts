@@ -11,7 +11,6 @@ import type {
   CredentialTypeDescription,
 } from '../../engine/types.js';
 import { builtinCredentialTypes } from '../../nodes/index.js';
-import { DEFAULT_WORKSPACE_ID } from '../workspaces/default-workspace.js';
 import { Cipher } from './cipher.js';
 import { Credential } from './credential.entity.js';
 import type {
@@ -24,7 +23,6 @@ type CredentialData = Record<string, unknown>;
 
 @Injectable()
 export class CredentialsService {
-  private readonly workspaceId = DEFAULT_WORKSPACE_ID;
   private readonly types = new Map(
     builtinCredentialTypes.map((t) => [t.type, t]),
   );
@@ -39,23 +37,26 @@ export class CredentialsService {
     return [...this.types.values()];
   }
 
-  async list(type?: string): Promise<CredentialDto[]> {
+  async list(workspaceId: string, type?: string): Promise<CredentialDto[]> {
     const items = await this.credentials.find({
-      where: { workspaceId: this.workspaceId, ...(type && { type }) },
+      where: { workspaceId, ...(type && { type }) },
       order: { name: 'ASC' },
     });
     return items.map((c) => this.toDto(c));
   }
 
-  async get(id: string): Promise<CredentialDto> {
-    return this.toDto(await this.findOrFail(id));
+  async get(workspaceId: string, id: string): Promise<CredentialDto> {
+    return this.toDto(await this.findOrFail(workspaceId, id));
   }
 
-  async create(dto: CreateCredentialDto): Promise<CredentialDto> {
+  async create(
+    workspaceId: string,
+    dto: CreateCredentialDto,
+  ): Promise<CredentialDto> {
     const data = this.validate(dto.type, dto.data);
     const saved = await this.credentials.save(
       this.credentials.create({
-        workspaceId: this.workspaceId,
+        workspaceId,
         name: dto.name,
         type: dto.type,
         data: this.cipher.encrypt(data),
@@ -64,8 +65,12 @@ export class CredentialsService {
     return this.toDto(saved);
   }
 
-  async update(id: string, dto: UpdateCredentialDto): Promise<CredentialDto> {
-    const credential = await this.findOrFail(id);
+  async update(
+    workspaceId: string,
+    id: string,
+    dto: UpdateCredentialDto,
+  ): Promise<CredentialDto> {
+    const credential = await this.findOrFail(workspaceId, id);
     if (dto.name !== undefined) credential.name = dto.name;
     if (dto.data) {
       const merged = {
@@ -79,10 +84,10 @@ export class CredentialsService {
     return this.toDto(await this.credentials.save(credential));
   }
 
-  async remove(id: string): Promise<void> {
+  async remove(workspaceId: string, id: string): Promise<void> {
     const result = await this.credentials.delete({
       id,
-      workspaceId: this.workspaceId,
+      workspaceId,
     });
     if (!result.affected)
       throw new NotFoundException(`Credential ${id} not found`);
@@ -108,10 +113,13 @@ export class CredentialsService {
     };
   }
 
-  private async findOrFail(id: string): Promise<Credential> {
+  private async findOrFail(
+    workspaceId: string,
+    id: string,
+  ): Promise<Credential> {
     const credential = await this.credentials.findOneBy({
       id,
-      workspaceId: this.workspaceId,
+      workspaceId,
     });
     if (!credential) throw new NotFoundException(`Credential ${id} not found`);
     return credential;

@@ -4,6 +4,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { type AppRole, type Env, validateEnv } from './config/env.js';
 import { dataSourceOptions } from './database/data-source-options.js';
+import { AuthModule } from './modules/auth/auth.module.js';
 import { BinaryDataModule } from './modules/binary-data/binary-data.module.js';
 import { CredentialsModule } from './modules/credentials/credentials.module.js';
 import { EventsModule } from './modules/events/execution-events.service.js';
@@ -61,7 +62,7 @@ export class AppModule {
         WorkflowsModule,
         ExecutionsModule,
         ...(serveHttp
-          ? [WebhooksModule, RealtimeModule, ExpressionsModule]
+          ? [AuthModule, WebhooksModule, RealtimeModule, ExpressionsModule]
           : []),
         ...(runWorker ? [WorkerModule] : []),
       ],

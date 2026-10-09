@@ -21,7 +21,6 @@ import { IsNull, LessThan, Repository } from 'typeorm';
 import type { Env } from '../../config/env.js';
 import { NodeOperationError } from '../../engine/errors.js';
 import type { BinaryMeta, BinaryRef, BinaryStore } from '../../engine/types.js';
-import { DEFAULT_WORKSPACE_ID } from '../workspaces/default-workspace.js';
 import { BinaryData } from './binary-data.entity.js';
 
 export interface BinaryScope {
@@ -137,8 +136,11 @@ export class BinaryDataService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** For the download endpoint (scoped to the caller's workspace). */
-  async download(id: string): Promise<{ file: BinaryData; body: Readable }> {
-    return this.open(DEFAULT_WORKSPACE_ID, id);
+  async download(
+    workspaceId: string,
+    id: string,
+  ): Promise<{ file: BinaryData; body: Readable }> {
+    return this.open(workspaceId, id);
   }
 
   /** Deletes files whose workflow is gone. Returns how many were removed. */
