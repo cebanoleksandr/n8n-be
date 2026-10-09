@@ -1,6 +1,8 @@
 import type { DataSourceOptions } from 'typeorm';
+import { Credential } from '../modules/credentials/credential.entity.js';
 import { ExecutionStep } from '../modules/executions/execution-step.entity.js';
 import { Execution } from '../modules/executions/execution.entity.js';
+import { Webhook } from '../modules/triggers/webhook.entity.js';
 import { WorkflowVersion } from '../modules/workflows/workflow-version.entity.js';
 import { Workflow } from '../modules/workflows/workflow.entity.js';
 import { Workspace } from '../modules/workspaces/workspace.entity.js';
@@ -13,6 +15,8 @@ export const entities = [
   WorkflowVersion,
   Execution,
   ExecutionStep,
+  Credential,
+  Webhook,
 ];
 
 export function dataSourceOptions(env: {

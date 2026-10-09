@@ -22,6 +22,8 @@ export interface WorkflowNode {
   /** When true, a failing node emits `{ error }` items instead of stopping the run. */
   continueOnFail?: boolean;
   disabled?: boolean;
+  /** Selected credentials: credential type -> credential id. */
+  credentials?: Record<string, string>;
 }
 
 export interface ConnectionEndpoint {
@@ -72,6 +74,8 @@ export interface PropertySchema {
   itemProperties?: PropertySchema[];
   /** Show this property only when other properties have one of the listed values. */
   displayOptions?: { show: Record<string, unknown[]> };
+  /** Credential fields only: never returned by the API once saved. */
+  secret?: boolean;
 }
 
 export type NodeGroup = 'trigger' | 'action' | 'transform' | 'flow';
@@ -87,6 +91,25 @@ export interface NodeTypeDescription {
   /** Output names; their order defines output indexes. */
   outputs: string[];
   properties: PropertySchema[];
+  /** Credential types this node can use. */
+  credentials?: NodeCredentialDescription[];
+}
+
+export interface NodeCredentialDescription {
+  type: string;
+  required?: boolean;
+  displayOptions?: { show: Record<string, unknown[]> };
+}
+
+export interface CredentialTypeDescription {
+  type: string;
+  displayName: string;
+  properties: PropertySchema[];
+}
+
+/** Resolves decrypted credential data for the workspace the run belongs to. */
+export interface CredentialsProvider {
+  get(id: string, type: string): Promise<Record<string, unknown>>;
 }
 
 export interface HttpRequestOptions {
@@ -109,6 +132,8 @@ export interface NodeExecuteContext {
   getInputItems(inputIndex?: number): Item[];
   /** Returns the parameter with expressions resolved against the item at `itemIndex`. */
   getParameter<T = unknown>(name: string, itemIndex: number): T;
+  /** Decrypted data of the credential selected on this node for `type`. */
+  getCredentials<T = Record<string, unknown>>(type: string): Promise<T>;
   helpers: {
     httpRequest(options: HttpRequestOptions): Promise<HttpResponse>;
   };

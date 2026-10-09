@@ -1,6 +1,16 @@
 import { NodeOperationError } from '../../engine/errors.js';
 import { toText } from '../../engine/expression.js';
-import type { JsonObject, JsonValue, NodeType } from '../../engine/types.js';
+import type {
+  JsonObject,
+  JsonValue,
+  NodeExecuteContext,
+  NodeType,
+} from '../../engine/types.js';
+import type {
+  HttpBasicAuth,
+  HttpBearerAuth,
+  HttpHeaderAuth,
+} from '../credentials.js';
 
 interface KeyValue {
   name: string;
@@ -9,6 +19,7 @@ interface KeyValue {
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD'];
 const BODY_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'];
+const AUTH_TYPES = ['httpHeaderAuth', 'httpBasicAuth', 'httpBearerAuth'];
 
 export const httpRequestNode: NodeType = {
   description: {
@@ -19,7 +30,24 @@ export const httpRequestNode: NodeType = {
     group: 'action',
     inputs: 1,
     outputs: ['main'],
+    credentials: AUTH_TYPES.map((type) => ({
+      type,
+      required: true,
+      displayOptions: { show: { authentication: [type] } },
+    })),
     properties: [
+      {
+        name: 'authentication',
+        displayName: 'Authentication',
+        type: 'options',
+        default: 'none',
+        options: [
+          { name: 'None', value: 'none' },
+          { name: 'Header Auth', value: 'httpHeaderAuth' },
+          { name: 'Basic Auth', value: 'httpBasicAuth' },
+          { name: 'Bearer Token', value: 'httpBearerAuth' },
+        ],
+      },
       {
         name: 'method',
         displayName: 'Method',
@@ -90,6 +118,7 @@ export const httpRequestNode: NodeType = {
   async execute(ctx) {
     const items = ctx.getInputItems();
     const output = [];
+    const authHeaders = await resolveAuthHeaders(ctx);
 
     for (let i = 0; i < items.length; i++) {
       const method = ctx.getParameter<string>('method', i);
@@ -110,6 +139,7 @@ export const httpRequestNode: NodeType = {
       for (const h of ctx.getParameter<KeyValue[]>('headers', i) ?? []) {
         if (h.name) headers[h.name] = toText(h.value);
       }
+      Object.assign(headers, authHeaders);
 
       let body: string | undefined;
       const rawBody = ctx.getParameter<unknown>('body', i);
@@ -155,6 +185,32 @@ export const httpRequestNode: NodeType = {
     return [output];
   },
 };
+
+async function resolveAuthHeaders(
+  ctx: NodeExecuteContext,
+): Promise<Record<string, string>> {
+  const auth = ctx.getParameter<string>('authentication', 0);
+  switch (auth) {
+    case 'httpHeaderAuth': {
+      const c = await ctx.getCredentials<HttpHeaderAuth>(auth);
+      return { [c.name]: c.value };
+    }
+    case 'httpBasicAuth': {
+      const c = await ctx.getCredentials<HttpBasicAuth>(auth);
+      const token = Buffer.from(`${c.user}:${c.password}`).toString('base64');
+      return { authorization: `Basic ${token}` };
+    }
+    case 'httpBearerAuth': {
+      const c = await ctx.getCredentials<HttpBearerAuth>(auth);
+      return { authorization: `Bearer ${c.token}` };
+    }
+    case 'none':
+    case undefined:
+      return {};
+    default:
+      throw new NodeOperationError(`Unknown authentication "${auth}"`);
+  }
+}
 
 function parseBody(body: string, format: string, itemIndex: number): JsonValue {
   if (format === 'text' || body === '') return body;

@@ -1,4 +1,4 @@
-import { WorkflowValidationError } from './errors.js';
+import { NodeOperationError, WorkflowValidationError } from './errors.js';
 import { resolveParameter } from './expression.js';
 import {
   incomingConnections,
@@ -8,6 +8,7 @@ import {
 import { httpRequest } from './http.js';
 import type { NodeRegistry } from './node-registry.js';
 import type {
+  CredentialsProvider,
   Item,
   JsonObject,
   NodeExecuteContext,
@@ -54,6 +55,7 @@ export interface RunOptions {
   triggerItems?: Item[];
   signal?: AbortSignal;
   hooks?: RunHooks;
+  credentials?: CredentialsProvider;
 }
 
 export class WorkflowRunner {
@@ -106,6 +108,7 @@ export class WorkflowRunner {
         inputs,
         outputsByName,
         signal,
+        options.credentials,
       );
       results.push(result);
       await hooks.nodeFinished?.(result);
@@ -158,6 +161,7 @@ export class WorkflowRunner {
     inputs: Item[][],
     outputsByName: Map<string, Item[][]>,
     signal: AbortSignal,
+    credentials: CredentialsProvider | undefined,
   ): Promise<NodeRunResult> {
     const startedAt = new Date();
     const outputCount = nodeType.description.outputs.length;
@@ -172,6 +176,16 @@ export class WorkflowRunner {
           itemIndex,
           nodeOutput: (nodeName) => outputsByName.get(nodeName)?.[0],
         }) as T;
+      },
+      getCredentials: async <T>(type: string) => {
+        const id = node.credentials?.[type];
+        if (!id) {
+          throw new NodeOperationError(`No "${type}" credential selected`);
+        }
+        if (!credentials) {
+          throw new NodeOperationError('Credentials are not available');
+        }
+        return (await credentials.get(id, type)) as T;
       },
       helpers: { httpRequest: (opts) => httpRequest(opts, signal) },
     };

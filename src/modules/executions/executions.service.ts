@@ -1,24 +1,40 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import type { Queue } from 'bullmq';
 import { Repository } from 'typeorm';
 import type { Page } from '../../common/pagination.js';
-import { WorkflowValidationError } from '../../engine/errors.js';
 import type { JsonObject } from '../../engine/types.js';
-import {
-  type RunResult,
-  WorkflowRunner,
-} from '../../engine/workflow-runner.js';
+import { JOB_RUN, type RunJobData, WORKFLOW_QUEUE } from '../../queue/queue.js';
+import { ExecutionEventsService } from '../events/execution-events.service.js';
 import { DEFAULT_WORKSPACE_ID } from '../workspaces/default-workspace.js';
 import { WorkflowsService } from '../workflows/workflows.service.js';
 import { ExecutionStep } from './execution-step.entity.js';
-import { Execution } from './execution.entity.js';
+import {
+  Execution,
+  type ExecutionMode,
+  isFinished,
+} from './execution.entity.js';
 import type {
   ExecutionDto,
   ExecutionStepDto,
   ExecutionSummaryDto,
   ListExecutionsQuery,
-  RunWorkflowDto,
 } from './executions.dto.js';
+
+export interface StartExecutionOptions {
+  mode: ExecutionMode;
+  startNodeId?: string;
+  /** JSON objects for the trigger node; each becomes one item. */
+  input?: JsonObject[];
+  /** false: the caller runs it itself (scheduled triggers already are on a worker). */
+  enqueue?: boolean;
+}
 
 @Injectable()
 export class ExecutionsService {
@@ -30,74 +46,88 @@ export class ExecutionsService {
     private readonly executions: Repository<Execution>,
     @InjectRepository(ExecutionStep)
     private readonly steps: Repository<ExecutionStep>,
+    @InjectQueue(WORKFLOW_QUEUE) private readonly queue: Queue,
     private readonly workflows: WorkflowsService,
-    private readonly runner: WorkflowRunner,
+    private readonly events: ExecutionEventsService,
   ) {}
 
-  /**
-   * Runs the current version in-process and waits for it to finish.
-   * Moves to a BullMQ worker in v0.2; the persisted shape stays the same.
-   */
-  async run(workflowId: string, dto: RunWorkflowDto): Promise<ExecutionDto> {
+  /** Creates a queued execution of the workflow's current version. */
+  async start(
+    workflowId: string,
+    options: StartExecutionOptions,
+  ): Promise<Execution> {
     const { workflow, version } = await this.workflows.getForRun(workflowId);
     const execution = await this.executions.save(
       this.executions.create({
-        workspaceId: this.workspaceId,
+        workspaceId: workflow.workspaceId,
         workflowId: workflow.id,
         workflowVersionId: version.id,
-        status: 'running',
-        mode: 'manual',
+        status: 'queued',
+        mode: options.mode,
+        startNodeId: options.startNodeId ?? null,
+        input: options.input?.map((json) => ({ json })) ?? null,
         error: null,
-        startedAt: new Date(),
+        startedAt: null,
         finishedAt: null,
       }),
     );
+    await this.events.publish({
+      type: 'execution.queued',
+      executionId: execution.id,
+      workflowId: workflow.id,
+      mode: execution.mode,
+      createdAt: execution.createdAt.toISOString(),
+    });
 
-    let stepIndex = 0;
-    let result: RunResult;
-    try {
-      result = await this.runner.run({
-        graph: version.graph,
-        startNodeId: dto.startNodeId,
-        triggerItems: dto.input?.map((json) => ({ json: json as JsonObject })),
-        hooks: {
-          nodeFinished: async (r) => {
-            await this.steps.save(
-              this.steps.create({
-                executionId: execution.id,
-                stepIndex: stepIndex++,
-                nodeId: r.nodeId,
-                nodeName: r.nodeName,
-                status: r.status,
-                output: r.output,
-                error: r.error ?? null,
-                startedAt: r.startedAt,
-                finishedAt: r.finishedAt,
-              }),
-            );
-          },
-        },
-      });
-    } catch (err) {
-      if (!(err instanceof WorkflowValidationError)) {
-        this.logger.error(
-          `Execution ${execution.id} crashed`,
-          err instanceof Error ? err.stack : err,
-        );
+    if (options.enqueue !== false) {
+      try {
+        const data: RunJobData = { executionId: execution.id };
+        await this.queue.add(JOB_RUN, data, { jobId: execution.id });
+      } catch (err) {
+        this.logger.error(`Failed to enqueue execution ${execution.id}`, err);
+        await this.executions.update(execution.id, {
+          status: 'error',
+          error: { name: 'QueueError', message: 'Failed to enqueue execution' },
+          finishedAt: new Date(),
+        });
+        throw new ServiceUnavailableException('Execution queue is unavailable');
       }
-      const message = err instanceof Error ? err.message : String(err);
-      result = {
-        status: 'error',
-        nodes: [],
-        error: { name: (err as Error)?.name ?? 'Error', message },
-      };
     }
+    return execution;
+  }
 
-    execution.status = result.status;
-    execution.error = result.error ?? null;
-    execution.finishedAt = new Date();
-    await this.executions.save(execution);
-    return this.get(execution.id);
+  /**
+   * Waits until the execution finishes or `timeoutMs` passes, then returns its
+   * current state (which may still be queued/running after a timeout).
+   */
+  async waitForFinish(id: string, timeoutMs: number): Promise<ExecutionDto> {
+    let unsubscribe: (() => void) | undefined;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const finished = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+        // Subscribe before reading the status so the finish event cannot slip between.
+        void this.events
+          .subscribe((event) => {
+            if (event.type === 'execution.finished' && event.executionId === id)
+              resolve();
+          })
+          .then(async (off) => {
+            unsubscribe = off;
+            const current = await this.executions.findOneBy({ id });
+            if (!current || isFinished(current.status)) resolve();
+          })
+          .catch((err: unknown) => {
+            this.logger.warn(`Cannot wait for execution ${id}: ${String(err)}`);
+            resolve();
+          });
+      });
+      await finished;
+    } finally {
+      clearTimeout(timer);
+      unsubscribe?.();
+    }
+    return this.get(id);
   }
 
   async list(query: ListExecutionsQuery): Promise<Page<ExecutionSummaryDto>> {
@@ -107,7 +137,7 @@ export class ExecutionsService {
         ...(query.workflowId && { workflowId: query.workflowId }),
         ...(query.status && { status: query.status }),
       },
-      order: { startedAt: 'DESC' },
+      order: { createdAt: 'DESC' },
       take: query.limit,
       skip: query.offset,
     });
@@ -128,7 +158,7 @@ export class ExecutionsService {
   }
 }
 
-function toSummary(e: Execution): ExecutionSummaryDto {
+export function toSummary(e: Execution): ExecutionSummaryDto {
   return {
     id: e.id,
     workflowId: e.workflowId,
@@ -136,6 +166,7 @@ function toSummary(e: Execution): ExecutionSummaryDto {
     status: e.status,
     mode: e.mode,
     error: e.error,
+    createdAt: e.createdAt,
     startedAt: e.startedAt,
     finishedAt: e.finishedAt,
   };

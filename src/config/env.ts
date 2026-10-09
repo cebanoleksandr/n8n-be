@@ -2,6 +2,9 @@ import { z } from 'zod';
 
 const booleanString = z.enum(['true', 'false']).transform((v) => v === 'true');
 
+export const APP_ROLES = ['all', 'api', 'worker'] as const;
+export type AppRole = (typeof APP_ROLES)[number];
+
 export const envSchema = z.object({
   NODE_ENV: z
     .enum(['development', 'test', 'production'])
@@ -10,6 +13,17 @@ export const envSchema = z.object({
   DATABASE_URL: z.url(),
   DB_MIGRATIONS_RUN: booleanString.default(true),
   DB_LOGGING: booleanString.default(false),
+  /** api: HTTP + WebSocket only; worker: executes queued runs; all: both (dev). */
+  APP_ROLE: z.enum(APP_ROLES).default('all'),
+  REDIS_URL: z.url().default('redis://localhost:6390'),
+  WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(5),
+  /** 32 random bytes, base64. Generate with `openssl rand -base64 32`. */
+  ENCRYPTION_KEY: z
+    .string()
+    .refine(
+      (v) => Buffer.from(v, 'base64').length === 32,
+      'must be 32 bytes encoded as base64 (openssl rand -base64 32)',
+    ),
   CORS_ORIGINS: z
     .string()
     .default('http://localhost:5173')

@@ -260,6 +260,7 @@ describe('WorkflowRunner', () => {
               method: req.method,
               url: req.url,
               auth: req.headers['x-token'],
+              authorization: req.headers.authorization,
               body,
             }),
           );
@@ -322,6 +323,55 @@ describe('WorkflowRunner', () => {
       });
       expect(result.status).toBe('error');
       expect(result.error?.message).toContain('status 500');
+    });
+
+    it('adds auth headers from the selected credential', async () => {
+      const requested: string[] = [];
+      const credentials = {
+        get: async (id: string, type: string) => {
+          requested.push(`${id}:${type}`);
+          return { user: 'ann', password: 'pw' };
+        },
+      };
+      const result = await runner.run({
+        graph: {
+          nodes: [
+            node('trigger', 'core.manualTrigger'),
+            node(
+              'http',
+              'core.httpRequest',
+              { url: baseUrl, authentication: 'httpBasicAuth' },
+              { credentials: { httpBasicAuth: 'cred-1' } },
+            ),
+          ],
+          connections: [connect('trigger', 'http')],
+        },
+        credentials,
+      });
+
+      expect(result.status).toBe('success');
+      expect(requested).toEqual(['cred-1:httpBasicAuth']);
+      expect(result.nodes[1].output[0][0].json.authorization).toBe(
+        `Basic ${Buffer.from('ann:pw').toString('base64')}`,
+      );
+    });
+
+    it('fails when the node has no credential selected', async () => {
+      const result = await runner.run({
+        graph: {
+          nodes: [
+            node('trigger', 'core.manualTrigger'),
+            node('http', 'core.httpRequest', {
+              url: baseUrl,
+              authentication: 'httpBearerAuth',
+            }),
+          ],
+          connections: [connect('trigger', 'http')],
+        },
+      });
+      expect(result.error?.message).toBe(
+        'No "httpBearerAuth" credential selected',
+      );
     });
   });
 });

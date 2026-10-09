@@ -10,6 +10,7 @@ import { EMPTY_GRAPH, validateGraph } from '../../engine/graph.js';
 import { NodeRegistry } from '../../engine/node-registry.js';
 import type { WorkflowGraph } from '../../engine/types.js';
 import type { Page, Pagination } from '../../common/pagination.js';
+import { TriggersService } from '../triggers/triggers.service.js';
 import { DEFAULT_WORKSPACE_ID } from '../workspaces/default-workspace.js';
 import { WorkflowVersion } from './workflow-version.entity.js';
 import { Workflow } from './workflow.entity.js';
@@ -33,6 +34,7 @@ export class WorkflowsService {
     @InjectRepository(WorkflowVersion)
     private readonly versions: Repository<WorkflowVersion>,
     private readonly registry: NodeRegistry,
+    private readonly triggers: TriggersService,
   ) {}
 
   async list({ limit, offset }: Pagination): Promise<Page<WorkflowSummaryDto>> {
@@ -78,17 +80,24 @@ export class WorkflowsService {
       if (!workflow) throw new NotFoundException(`Workflow ${id} not found`);
 
       let version = await this.currentVersion(workflow, em);
-      if (dto.graph && !isDeepStrictEqual(dto.graph, version.graph)) {
+      const graphChanged =
+        dto.graph !== undefined && !isDeepStrictEqual(dto.graph, version.graph);
+      if (graphChanged) {
         version = await this.addVersion(
           em,
           workflow,
           version.version + 1,
-          dto.graph,
+          dto.graph!,
         );
       }
       if (dto.name !== undefined) workflow.name = dto.name;
+      const activeChanged =
+        dto.active !== undefined && dto.active !== workflow.active;
       if (dto.active !== undefined) workflow.active = dto.active;
       await em.save(workflow);
+      if (activeChanged || (graphChanged && workflow.active)) {
+        await this.triggers.sync(em, workflow, version.graph);
+      }
       return toDto(workflow, version);
     });
   }
@@ -100,6 +109,7 @@ export class WorkflowsService {
     });
     if (!result.affected)
       throw new NotFoundException(`Workflow ${id} not found`);
+    await this.triggers.removeSchedulers(id);
   }
 
   async listVersions(id: string): Promise<WorkflowVersionDto[]> {

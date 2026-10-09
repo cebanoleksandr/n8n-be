@@ -1,5 +1,6 @@
 import {
   Column,
+  CreateDateColumn,
   Entity,
   Index,
   JoinColumn,
@@ -8,16 +9,29 @@ import {
   type Relation,
 } from 'typeorm';
 import type { SerializedError } from '../../engine/workflow-runner.js';
+import type { StoredItem } from './execution-step.entity.js';
 import { WorkflowVersion } from '../workflows/workflow-version.entity.js';
 import { Workflow } from '../workflows/workflow.entity.js';
 import { Workspace } from '../workspaces/workspace.entity.js';
 
-export type ExecutionStatus = 'running' | 'success' | 'error' | 'canceled';
-export type ExecutionMode = 'manual';
+export const EXECUTION_STATUSES = [
+  'queued',
+  'running',
+  'success',
+  'error',
+  'canceled',
+] as const;
+export type ExecutionStatus = (typeof EXECUTION_STATUSES)[number];
+export const EXECUTION_MODES = ['manual', 'webhook', 'schedule'] as const;
+export type ExecutionMode = (typeof EXECUTION_MODES)[number];
+
+export function isFinished(status: ExecutionStatus): boolean {
+  return status !== 'queued' && status !== 'running';
+}
 
 @Entity('executions')
-@Index(['workflowId', 'startedAt'])
-@Index(['workspaceId', 'startedAt'])
+@Index(['workflowId', 'createdAt'])
+@Index(['workspaceId', 'createdAt'])
 export class Execution {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -49,11 +63,27 @@ export class Execution {
   @Column({ type: 'varchar', length: 16 })
   mode: ExecutionMode;
 
+  /** Trigger node the run starts from; null means the first trigger. */
+  @Column({
+    name: 'start_node_id',
+    type: 'varchar',
+    length: 64,
+    nullable: true,
+  })
+  startNodeId: string | null;
+
+  /** Items handed to the trigger node (webhook request, schedule tick, manual input). */
+  @Column({ type: 'jsonb', nullable: true })
+  input: StoredItem[] | null;
+
   @Column({ type: 'jsonb', nullable: true })
   error: (SerializedError & { nodeId?: string }) | null;
 
-  @Column({ name: 'started_at', type: 'timestamptz' })
-  startedAt: Date;
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
+  createdAt: Date;
+
+  @Column({ name: 'started_at', type: 'timestamptz', nullable: true })
+  startedAt: Date | null;
 
   @Column({ name: 'finished_at', type: 'timestamptz', nullable: true })
   finishedAt: Date | null;

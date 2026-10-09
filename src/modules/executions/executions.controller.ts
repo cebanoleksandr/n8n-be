@@ -6,8 +6,16 @@ import {
   ParseUUIDPipe,
   Post,
   Query,
+  Res,
 } from '@nestjs/common';
-import { ApiBody, ApiOkResponse, ApiTags } from '@nestjs/swagger';
+import {
+  ApiAcceptedResponse,
+  ApiBody,
+  ApiOkResponse,
+  ApiQuery,
+  ApiTags,
+} from '@nestjs/swagger';
+import type { Response } from 'express';
 import type { Page } from '../../common/pagination.js';
 import { ZodValidationPipe } from '../../common/zod-validation.pipe.js';
 import {
@@ -16,9 +24,12 @@ import {
   ListExecutionsQuery,
   listExecutionsSchema,
   RunWorkflowDto,
+  runQuerySchema,
   runWorkflowSchema,
 } from './executions.dto.js';
-import { ExecutionsService } from './executions.service.js';
+import { ExecutionsService, toSummary } from './executions.service.js';
+
+const RUN_WAIT_TIMEOUT_MS = 60_000;
 
 @ApiTags('executions')
 @Controller()
@@ -27,13 +38,31 @@ export class ExecutionsController {
 
   @Post('workflows/:id/run')
   @ApiBody({ type: RunWorkflowDto, required: false })
-  @ApiOkResponse({ type: ExecutionDto })
-  run(
+  @ApiQuery({
+    name: 'wait',
+    required: false,
+    description: `true: respond when the run finishes (up to ${RUN_WAIT_TIMEOUT_MS / 1000}s)`,
+  })
+  @ApiAcceptedResponse({ type: ExecutionSummaryDto, description: 'Queued' })
+  @ApiOkResponse({ type: ExecutionDto, description: 'With ?wait=true' })
+  async run(
     @Param('id', ParseUUIDPipe) id: string,
     @Body(new ZodValidationPipe(runWorkflowSchema.default({})))
     dto: RunWorkflowDto,
-  ): Promise<ExecutionDto> {
-    return this.service.run(id, dto);
+    @Query(new ZodValidationPipe(runQuerySchema)) query: { wait: boolean },
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<ExecutionSummaryDto | ExecutionDto> {
+    const execution = await this.service.start(id, {
+      mode: 'manual',
+      startNodeId: dto.startNodeId,
+      input: dto.input,
+    });
+    if (query.wait) {
+      res.status(200);
+      return this.service.waitForFinish(execution.id, RUN_WAIT_TIMEOUT_MS);
+    }
+    res.status(202);
+    return toSummary(execution);
   }
 
   @Get('executions')

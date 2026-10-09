@@ -3,14 +3,14 @@ import { z } from 'zod';
 import { paginationSchema } from '../../common/pagination.js';
 import type { JsonObject } from '../../engine/types.js';
 import type { StoredItem } from './execution-step.entity.js';
-import type { ExecutionMode, ExecutionStatus } from './execution.entity.js';
+import {
+  EXECUTION_MODES,
+  EXECUTION_STATUSES,
+  type ExecutionMode,
+  type ExecutionStatus,
+} from './execution.entity.js';
 
-const STATUSES = [
-  'running',
-  'success',
-  'error',
-  'canceled',
-] as const satisfies ExecutionStatus[];
+const STATUSES = EXECUTION_STATUSES;
 
 export const runWorkflowSchema = z.object({
   startNodeId: z.string().optional(),
@@ -33,6 +33,13 @@ export class RunWorkflowDto {
   })
   input?: JsonObject[];
 }
+
+export const runQuerySchema = z.object({
+  wait: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
+});
 
 export const listExecutionsSchema = paginationSchema.extend({
   workflowId: z.uuid().optional(),
@@ -58,10 +65,11 @@ export class ExecutionSummaryDto {
   @ApiProperty() workflowId: string;
   @ApiProperty() workflowVersionId: string;
   @ApiProperty({ enum: STATUSES }) status: ExecutionStatus;
-  @ApiProperty() mode: ExecutionMode;
+  @ApiProperty({ enum: EXECUTION_MODES }) mode: ExecutionMode;
   @ApiProperty({ type: ExecutionErrorDto, nullable: true })
   error: ExecutionErrorDto | null;
-  @ApiProperty() startedAt: Date;
+  @ApiProperty() createdAt: Date;
+  @ApiProperty({ nullable: true }) startedAt: Date | null;
   @ApiProperty({ nullable: true }) finishedAt: Date | null;
 }
 

@@ -23,6 +23,7 @@ export const workflowGraphSchema = z.object({
       parameters: z.record(z.string(), z.unknown()),
       continueOnFail: z.boolean().optional(),
       disabled: z.boolean().optional(),
+      credentials: z.record(z.string(), z.string()).optional(),
     }),
   ),
   connections: z.array(z.object({ from: endpointSchema, to: endpointSchema })),

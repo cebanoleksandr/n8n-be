@@ -1,14 +1,8 @@
-import { Test } from '@nestjs/testing';
-import type { NestExpressApplication } from '@nestjs/platform-express';
-import request from 'supertest';
-import { AppModule } from '../src/app.module.js';
-import { configureApp } from '../src/app.setup.js';
 import type { WorkflowGraph } from '../src/engine/types.js';
+import { createTestApp, type TestApp } from './test-app.js';
 
-// Requires Postgres from docker-compose and DATABASE_URL in .env.
 describe('Workflows & executions (e2e)', () => {
-  let app: NestExpressApplication;
-  const created: string[] = [];
+  let t: TestApp;
 
   const graph: WorkflowGraph = {
     nodes: [
@@ -51,21 +45,13 @@ describe('Workflows & executions (e2e)', () => {
     ],
   };
 
-  const api = () => request(app.getHttpServer());
+  const api = () => t.api();
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({
-      imports: [AppModule],
-    }).compile();
-    app = moduleRef.createNestApplication<NestExpressApplication>();
-    configureApp(app);
-    await app.init();
+    t = await createTestApp();
   });
 
-  afterAll(async () => {
-    for (const id of created) await api().delete(`/api/workflows/${id}`);
-    await app.close();
-  });
+  afterAll(() => t.close());
 
   it('reports health and lists node types', async () => {
     await api().get('/api/health').expect(200, { status: 'ok' });
@@ -103,15 +89,12 @@ describe('Workflows & executions (e2e)', () => {
   });
 
   it('creates, versions, runs and records a workflow', async () => {
-    const createRes = await api()
-      .post('/api/workflows')
-      .send({ name: 'Greeter' })
-      .expect(201);
-    const id: string = createRes.body.id;
-    created.push(id);
+    const id = await t.createWorkflow('Greeter');
+    const createRes = await api().get(`/api/workflows/${id}`).expect(200);
     expect(createRes.body).toMatchObject({
       name: 'Greeter',
       version: 1,
+      active: false,
       graph: { nodes: [], connections: [] },
     });
 
@@ -136,16 +119,17 @@ describe('Workflows & executions (e2e)', () => {
     ]);
 
     const run = await api()
-      .post(`/api/workflows/${id}/run`)
+      .post(`/api/workflows/${id}/run?wait=true`)
       .send({
         input: [
           { name: 'Ann', age: 30 },
           { name: 'Bob', age: 12 },
         ],
       })
-      .expect(201);
+      .expect(200);
     expect(run.body).toMatchObject({
       status: 'success',
+      mode: 'manual',
       workflowVersionId: updated.body.versionId,
       error: null,
     });
@@ -171,18 +155,21 @@ describe('Workflows & executions (e2e)', () => {
   });
 
   it('records a failed run when the workflow has no trigger', async () => {
-    const res = await api()
-      .post('/api/workflows')
-      .send({ name: 'Empty' })
-      .expect(201);
-    created.push(res.body.id);
+    const id = await t.createWorkflow('Empty');
     const run = await api()
-      .post(`/api/workflows/${res.body.id}/run`)
-      .expect(201);
+      .post(`/api/workflows/${id}/run?wait=true`)
+      .expect(200);
     expect(run.body).toMatchObject({
       status: 'error',
       error: { message: expect.stringContaining('no trigger') },
     });
+  });
+
+  it('queues a run and returns 202 without wait', async () => {
+    const id = await t.createWorkflow('Queued', graph);
+    const res = await api().post(`/api/workflows/${id}/run`).expect(202);
+    expect(res.body).toMatchObject({ status: 'queued', startedAt: null });
+    expect(res.body).not.toHaveProperty('steps');
   });
 
   it('returns 404 for unknown ids and 400 for malformed ones', async () => {
