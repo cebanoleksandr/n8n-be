@@ -21,6 +21,11 @@ services:
       - '${REDIS_PORT:-6390}:6379'
     volumes:
       - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   # S3-compatible storage for binary data (files attached to items). Any S3
   # service works; SeaweedFS is used because MinIO no longer publishes images.
@@ -32,6 +37,50 @@ services:
     volumes:
       - ./docker/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
       - s3-data:/data
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:8333/healthz']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # The app itself: `docker compose --profile app up --build`.
+  # Secrets come from .env; service addresses are overridden for the network.
+  api:
+    profiles: [app]
+    build: .
+    image: flow-backend:local
+    env_file: .env
+    environment: &app-env
+      APP_ROLE: api
+      DATABASE_URL: postgres://flow:flow@postgres:5432/flow
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://s3:8333
+      DB_MIGRATIONS_RUN: 'true'
+    ports:
+      - '${APP_PORT:-3000}:3000'
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      s3: { condition: service_healthy }
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3000/api/health/ready']
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  worker:
+    profiles: [app]
+    # Same image as api (built by it).
+    image: flow-backend:local
+    env_file: .env
+    environment:
+      <<: *app-env
+      APP_ROLE: worker
+      # Only the API runs migrations, so instances never race on them.
+      DB_MIGRATIONS_RUN: 'false'
+    depends_on:
+      api: { condition: service_healthy }
 
 volumes:
   postgres-data:

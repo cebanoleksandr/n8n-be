@@ -17,7 +17,13 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
 import type { Readable } from 'node:stream';
-import { IsNull, LessThan, Repository } from 'typeorm';
+import {
+  type FindOptionsWhere,
+  In,
+  IsNull,
+  LessThan,
+  Repository,
+} from 'typeorm';
 import type { Env } from '../../config/env.js';
 import { NodeOperationError } from '../../engine/errors.js';
 import type { BinaryMeta, BinaryRef, BinaryStore } from '../../engine/types.js';
@@ -72,6 +78,11 @@ export class BinaryDataService implements OnModuleInit, OnModuleDestroy {
         );
       }
     }
+  }
+
+  /** Throws when the bucket is unreachable (readiness check). */
+  async ping(): Promise<void> {
+    await this.s3.send(new HeadBucketCommand({ Bucket: this.bucket }));
   }
 
   onModuleDestroy(): void {
@@ -145,14 +156,35 @@ export class BinaryDataService implements OnModuleInit, OnModuleDestroy {
 
   /** Deletes files whose workflow is gone. Returns how many were removed. */
   async deleteOrphans(graceMs = ORPHAN_GRACE_MS): Promise<number> {
+    return this.deleteWhere({
+      workflowId: IsNull(),
+      createdAt: LessThan(new Date(Date.now() - graceMs)),
+    });
+  }
+
+  /** Files produced by (or uploaded for) the given executions. */
+  deleteForExecutions(executionIds: string[]): Promise<number> {
+    return executionIds.length
+      ? this.deleteWhere({ executionId: In(executionIds) })
+      : Promise.resolve(0);
+  }
+
+  /** Webhook uploads whose execution was never created (e.g. the start failed). */
+  deleteUnlinkedBefore(cutoff: Date): Promise<number> {
+    return this.deleteWhere({
+      executionId: IsNull(),
+      createdAt: LessThan(cutoff),
+    });
+  }
+
+  private async deleteWhere(
+    where: FindOptionsWhere<BinaryData>,
+  ): Promise<number> {
     let removed = 0;
     for (;;) {
       const batch = await this.files.find({
         select: { id: true, storageKey: true },
-        where: {
-          workflowId: IsNull(),
-          createdAt: LessThan(new Date(Date.now() - graceMs)),
-        },
+        where,
         take: CLEANUP_BATCH,
       });
       if (batch.length === 0) return removed;

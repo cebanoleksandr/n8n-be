@@ -10,7 +10,9 @@ import type { Job, Queue } from 'bullmq';
 import type { Env } from '../../config/env.js';
 import {
   BINARY_CLEANUP_SCHEDULER,
+  EXECUTION_PRUNE_SCHEDULER,
   JOB_BINARY_CLEANUP,
+  JOB_EXECUTION_PRUNE,
   JOB_RUN,
   JOB_SCHEDULED_TRIGGER,
   type RunJobData,
@@ -19,6 +21,7 @@ import {
 } from '../../queue/queue.js';
 import { BinaryDataService } from '../binary-data/binary-data.service.js';
 import { ExecutionExecutor } from './execution-executor.service.js';
+import { ExecutionPruner } from './execution-pruner.service.js';
 
 // maxStalledCount 0: a job whose worker died is failed instead of re-run,
 // because re-running nodes with side effects is worse than reporting an error.
@@ -32,6 +35,7 @@ export class WorkflowProcessor
   constructor(
     private readonly executor: ExecutionExecutor,
     private readonly binaryData: BinaryDataService,
+    private readonly pruner: ExecutionPruner,
     private readonly config: ConfigService<Env, true>,
     @InjectQueue(WORKFLOW_QUEUE) private readonly queue: Queue,
   ) {
@@ -43,6 +47,11 @@ export class WorkflowProcessor
       BINARY_CLEANUP_SCHEDULER,
       { every: 60 * 60 * 1000 },
       { name: JOB_BINARY_CLEANUP },
+    );
+    await this.queue.upsertJobScheduler(
+      EXECUTION_PRUNE_SCHEDULER,
+      { every: 60 * 60 * 1000 },
+      { name: JOB_EXECUTION_PRUNE },
     );
     this.worker.concurrency = this.config.get('WORKER_CONCURRENCY', {
       infer: true,
@@ -56,6 +65,11 @@ export class WorkflowProcessor
         return this.executor.execute((job.data as RunJobData).executionId);
       case JOB_SCHEDULED_TRIGGER:
         return this.executor.runScheduled(job.data as ScheduledTriggerJobData);
+      case JOB_EXECUTION_PRUNE: {
+        const deleted = await this.pruner.prune();
+        if (deleted > 0) this.logger.log(`Pruned ${deleted} old executions`);
+        return;
+      }
       case JOB_BINARY_CLEANUP: {
         const removed = await this.binaryData.deleteOrphans();
         if (removed > 0) this.logger.log(`Deleted ${removed} orphaned files`);

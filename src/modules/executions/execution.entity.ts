@@ -31,6 +31,13 @@ export const EXECUTION_MODES = [
 ] as const;
 export type ExecutionMode = (typeof EXECUTION_MODES)[number];
 
+export interface ExecutionRunOptions {
+  destinationNodeId?: string;
+  runFromNodeId?: string;
+  /** Resolved when the run is created, so it is fixed even if newer runs finish. */
+  sourceExecutionId?: string;
+}
+
 export function isFinished(status: ExecutionStatus): boolean {
   return status !== 'queued' && status !== 'running';
 }
@@ -38,6 +45,7 @@ export function isFinished(status: ExecutionStatus): boolean {
 @Entity('executions')
 @Index(['workflowId', 'createdAt'])
 @Index(['workspaceId', 'createdAt'])
+@Index(['finishedAt'])
 export class Execution {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -77,6 +85,10 @@ export class Execution {
     nullable: true,
   })
   startNodeId: string | null;
+
+  /** Partial-run options of manual runs (see RunWorkflowDto). */
+  @Column({ name: 'run_options', type: 'jsonb', nullable: true })
+  runOptions: ExecutionRunOptions | null;
 
   /** Items handed to the trigger node (webhook request, schedule tick, manual input). */
   @Column({ type: 'jsonb', nullable: true })

@@ -60,6 +60,10 @@ export class ExecutionStep {
   @Column({ type: 'int', default: 1 })
   tries: number;
 
+  /** Output came from the workflow's pinned test data. */
+  @Column({ type: 'boolean', default: false })
+  pinned: boolean;
+
   @Column({ name: 'started_at', type: 'timestamptz' })
   startedAt: Date;
 

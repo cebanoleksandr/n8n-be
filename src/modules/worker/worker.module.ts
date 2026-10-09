@@ -7,6 +7,7 @@ import { ExecutionsModule } from '../executions/executions.module.js';
 import { WorkflowVersion } from '../workflows/workflow-version.entity.js';
 import { Workflow } from '../workflows/workflow.entity.js';
 import { ExecutionExecutor } from './execution-executor.service.js';
+import { ExecutionPruner } from './execution-pruner.service.js';
 import { WorkflowProcessor } from './workflow.processor.js';
 
 /** Imported only when the process runs with APP_ROLE=worker or all. */
@@ -18,6 +19,6 @@ import { WorkflowProcessor } from './workflow.processor.js';
     CredentialsModule,
     BinaryDataModule,
   ],
-  providers: [ExecutionExecutor, WorkflowProcessor],
+  providers: [ExecutionExecutor, ExecutionPruner, WorkflowProcessor],
 })
 export class WorkerModule {}

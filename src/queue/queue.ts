@@ -10,6 +10,9 @@ export const JOB_SCHEDULED_TRIGGER = 'scheduled-trigger';
 /** Hourly: delete stored files whose workflow was deleted. */
 export const JOB_BINARY_CLEANUP = 'binary-cleanup';
 export const BINARY_CLEANUP_SCHEDULER = 'maintenance:binary-cleanup';
+/** Hourly: delete old finished executions (EXECUTIONS_MAX_AGE_DAYS). */
+export const JOB_EXECUTION_PRUNE = 'execution-prune';
+export const EXECUTION_PRUNE_SCHEDULER = 'maintenance:execution-prune';
 
 export interface RunJobData {
   executionId: string;

@@ -34,8 +34,10 @@ export interface NodeRunResult {
   /** One item array per output. */
   output: Item[][];
   error?: SerializedError;
-  /** Attempts made, > 1 when retryOnFail kicked in. */
+  /** Attempts made, > 1 when retryOnFail kicked in; 0 when pinned. */
   tries: number;
+  /** Output came from pinned test data instead of executing the node. */
+  pinned?: boolean;
 }
 
 export type RunStatus = 'success' | 'error' | 'canceled';
@@ -55,10 +57,24 @@ export interface RunHooks {
   nodeFinished?(result: NodeRunResult): void | Promise<void>;
 }
 
+/** Re-run part of a workflow on top of an earlier run's data. */
+export interface RunFrom {
+  /** First node to execute; its upstream nodes are not run again. */
+  nodeId: string;
+  /** Outputs of nodes from the earlier run, by node id. */
+  previousOutputs: Record<string, Item[][]>;
+}
+
 export interface RunOptions {
   graph: WorkflowGraph;
   /** Trigger node to start from. Defaults to the first trigger node in the graph. */
   startNodeId?: string;
+  /** Start at any node using earlier outputs instead of at a trigger. */
+  runFrom?: RunFrom;
+  /** Stop after this node: only it and its upstream nodes run. */
+  destinationNodeId?: string;
+  /** Test data by node id, used instead of executing those nodes (manual runs). */
+  pinData?: Record<string, Item[]>;
   /** Items handed to the start node. Defaults to a single empty item. */
   triggerItems?: Item[];
   /** Aborting it stops the run: between nodes, during retries and mid-node. */
@@ -85,20 +101,65 @@ export class WorkflowRunner {
     const issues = validateGraph(graph, this.registry);
     if (issues.length > 0) throw new WorkflowValidationError(issues);
 
-    const startNode = this.findStartNode(graph, options.startNodeId);
-    const reachable = reachableFrom(graph, startNode.id);
     const incoming = incomingConnections(graph);
     const outputs = new Map<string, Item[][]>();
     const outputsByName = new Map<string, Item[][]>();
     const results: NodeRunResult[] = [];
 
+    let startNode: WorkflowNode;
+    let toRun: Set<string>;
+    if (options.runFrom) {
+      startNode = this.findNode(graph, options.runFrom.nodeId);
+      toRun = reachableFrom(graph, startNode.id);
+      // Everything upstream keeps the earlier run's output.
+      for (const [nodeId, output] of Object.entries(
+        options.runFrom.previousOutputs,
+      )) {
+        const node = graph.nodes.find((n) => n.id === nodeId);
+        if (!node || toRun.has(nodeId)) continue;
+        outputs.set(nodeId, output);
+        outputsByName.set(node.name, output);
+      }
+      const startType = this.registry.getOrThrow(
+        startNode.type,
+        startNode.typeVersion,
+      );
+      const hasInput =
+        startType.description.group === 'trigger' ||
+        options.pinData?.[startNode.id] !== undefined ||
+        collectInputs(
+          startType,
+          incoming.get(startNode.id) ?? [],
+          outputs,
+        ).some((items) => items.length > 0);
+      if (!hasInput) {
+        throw new WorkflowValidationError([
+          {
+            nodeId: startNode.id,
+            message: `No input data for "${startNode.name}": run the nodes before it first`,
+          },
+        ]);
+      }
+    } else {
+      startNode = this.findStartNode(graph, options.startNodeId);
+      toRun = reachableFrom(graph, startNode.id);
+    }
+    if (options.destinationNodeId) {
+      const destination = this.findNode(graph, options.destinationNodeId);
+      const upstream = ancestorsOf(graph, destination.id);
+      toRun = new Set([...toRun].filter((id) => upstream.has(id)));
+    }
+    const isTriggerStart =
+      this.registry.getOrThrow(startNode.type, startNode.typeVersion)
+        .description.group === 'trigger';
+
     for (const node of topologicalOrder(graph)!) {
-      if (!reachable.has(node.id)) continue;
+      if (!toRun.has(node.id)) continue;
       if (signal.aborted) return { status: 'canceled', nodes: results };
 
       const nodeType = this.registry.getOrThrow(node.type, node.typeVersion);
       const inputs =
-        node.id === startNode.id
+        node.id === startNode.id && isTriggerStart
           ? [options.triggerItems ?? [{ json: {} }]]
           : collectInputs(nodeType, incoming.get(node.id) ?? [], outputs);
 
@@ -116,11 +177,14 @@ export class WorkflowRunner {
       }
 
       await hooks.nodeStarted?.(node);
-      const result = await this.executeNode(node, nodeType, inputs, {
-        outputsByName,
-        signal,
-        options,
-      });
+      const pinned = options.pinData?.[node.id];
+      const result = pinned
+        ? pinnedResult(node, nodeType, pinned)
+        : await this.executeNode(node, nodeType, inputs, {
+            outputsByName,
+            signal,
+            options,
+          });
       results.push(result);
       await hooks.nodeFinished?.(result);
 
@@ -137,6 +201,16 @@ export class WorkflowRunner {
     }
 
     return { status: 'success', nodes: results };
+  }
+
+  private findNode(graph: WorkflowGraph, nodeId: string): WorkflowNode {
+    const node = graph.nodes.find((n) => n.id === nodeId);
+    if (!node) {
+      throw new WorkflowValidationError([
+        { message: `Node "${nodeId}" not found` },
+      ]);
+    }
+    return node;
   }
 
   private findStartNode(
@@ -312,6 +386,43 @@ function reachableFrom(graph: WorkflowGraph, startId: string): Set<string> {
     }
   }
   return seen;
+}
+
+/** The node and every node with a path to it. */
+function ancestorsOf(graph: WorkflowGraph, nodeId: string): Set<string> {
+  const seen = new Set([nodeId]);
+  const stack = [nodeId];
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    for (const c of graph.connections) {
+      if (c.to.nodeId === id && !seen.has(c.from.nodeId)) {
+        seen.add(c.from.nodeId);
+        stack.push(c.from.nodeId);
+      }
+    }
+  }
+  return seen;
+}
+
+function pinnedResult(
+  node: WorkflowNode,
+  nodeType: NodeType,
+  items: Item[],
+): NodeRunResult {
+  const now = new Date();
+  return {
+    nodeId: node.id,
+    nodeName: node.name,
+    status: 'success',
+    startedAt: now,
+    finishedAt: now,
+    output: [
+      structuredClone(items),
+      ...nodeType.description.outputs.slice(1).map(() => []),
+    ],
+    tries: 0,
+    pinned: true,
+  };
 }
 
 function defaultFor(nodeType: NodeType, name: string): unknown {

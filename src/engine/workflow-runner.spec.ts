@@ -389,6 +389,101 @@ describe('WorkflowRunner', () => {
     });
   });
 
+  describe('partial runs and pinned data', () => {
+    // trigger -> a -> b -> c, and a -> side
+    const chain = {
+      nodes: [
+        node('trigger', 'core.manualTrigger'),
+        node('a', 'core.set', {
+          assignments: [{ name: 'a', type: 'number', value: '1' }],
+        }),
+        node('b', 'core.set', {
+          assignments: [
+            {
+              name: 'b',
+              type: 'string',
+              value: 'from {{ $node["a"].json.a }}',
+            },
+          ],
+        }),
+        node('c', 'core.set', {
+          assignments: [{ name: 'c', type: 'boolean', value: 'true' }],
+        }),
+        node('side', 'core.set'),
+      ],
+      connections: [
+        connect('trigger', 'a'),
+        connect('a', 'b'),
+        connect('b', 'c'),
+        connect('a', 'side'),
+      ],
+    };
+    const ids = (r: { nodes: { nodeId: string }[] }) =>
+      r.nodes.map((n) => n.nodeId);
+
+    it('runs only up to the destination node', async () => {
+      const result = await runner.run({ graph: chain, destinationNodeId: 'b' });
+      expect(result.status).toBe('success');
+      expect(ids(result)).toEqual(['trigger', 'a', 'b']);
+    });
+
+    it('re-runs from a node using earlier outputs', async () => {
+      const result = await runner.run({
+        graph: chain,
+        runFrom: {
+          nodeId: 'b',
+          previousOutputs: {
+            trigger: [[{ json: {} }]],
+            a: [[{ json: { a: 42 } }]],
+            b: [[{ json: { stale: true } }]],
+          },
+        },
+      });
+      expect(ids(result)).toEqual(['b', 'c']);
+      expect(result.nodes[0].output[0][0].json).toEqual({
+        a: 42,
+        b: 'from 42',
+      });
+    });
+
+    it('requires data for the node a partial run starts from', async () => {
+      await expect(
+        runner.run({
+          graph: chain,
+          runFrom: { nodeId: 'c', previousOutputs: {} },
+        }),
+      ).rejects.toThrow('No input data for "c"');
+    });
+
+    it('uses pinned data instead of executing nodes', async () => {
+      const result = await runner.run({
+        graph: chain,
+        pinData: {
+          trigger: [{ json: { pinnedTrigger: true } }],
+          a: [{ json: { a: 7 } }, { json: { a: 8 } }],
+        },
+        destinationNodeId: 'b',
+      });
+      expect(
+        result.nodes.map((n) => [n.nodeId, n.pinned ?? false, n.tries]),
+      ).toEqual([
+        ['trigger', true, 0],
+        ['a', true, 0],
+        ['b', false, 1],
+      ]);
+      expect(result.nodes[2].output[0].map((i) => i.json.b)).toEqual([
+        'from 7',
+        'from 8',
+      ]);
+    });
+
+    it('rejects unknown nodes', async () => {
+      await expect(
+        runner.run({ graph: chain, destinationNodeId: 'nope' }),
+      ).rejects.toThrow('Node "nope" not found');
+    });
+  });
+
   describe('HTTP Request node', () => {
     let server: Server;
     let baseUrl: string;

@@ -129,9 +129,23 @@ export class ExecutionExecutor
         id: execution.workflowVersionId,
       });
       let stepIndex = 0;
+      const runOptions = execution.runOptions ?? {};
       result = await this.runner.run({
         graph: version.graph,
         startNodeId: execution.startNodeId ?? undefined,
+        destinationNodeId: runOptions.destinationNodeId,
+        runFrom:
+          runOptions.runFromNodeId && runOptions.sourceExecutionId
+            ? {
+                nodeId: runOptions.runFromNodeId,
+                previousOutputs: await this.previousOutputs(
+                  runOptions.sourceExecutionId,
+                ),
+              }
+            : undefined,
+        // Pinned test data only applies to runs started from the editor.
+        pinData:
+          execution.mode === 'manual' ? toItems(workflow.pinData) : undefined,
         triggerItems: (execution.input as Item[] | null) ?? undefined,
         signal: controller.signal,
         credentials: this.credentials.providerFor(execution.workspaceId),
@@ -160,6 +174,7 @@ export class ExecutionExecutor
                 output: r.output,
                 error: r.error ?? null,
                 tries: r.tries,
+                pinned: r.pinned ?? false,
                 startedAt: r.startedAt,
                 finishedAt: r.finishedAt,
               }),
@@ -238,6 +253,34 @@ export class ExecutionExecutor
     if (execution) {
       await this.finish(execution, 'error', { name: 'WorkerError', message });
     }
+  }
+
+  /**
+   * Successful node outputs of an earlier run. When that run was itself
+   * partial, its own source is included too (newer outputs win).
+   */
+  private async previousOutputs(
+    executionId: string,
+  ): Promise<Record<string, Item[][]>> {
+    const chain: string[] = [];
+    let next: string | undefined = executionId;
+    while (next && chain.length < MAX_SOURCE_CHAIN && !chain.includes(next)) {
+      chain.push(next);
+      const source: Execution | null = await this.executions.findOne({
+        select: { id: true, runOptions: true },
+        where: { id: next },
+      });
+      next = source?.runOptions?.sourceExecutionId;
+    }
+    const outputs: Record<string, Item[][]> = {};
+    for (const id of chain.reverse()) {
+      const steps = await this.steps.find({
+        where: { executionId: id, status: 'success' },
+        order: { stepIndex: 'ASC' },
+      });
+      for (const step of steps) outputs[step.nodeId] = step.output as Item[][];
+    }
+    return outputs;
   }
 
   private timeoutSeconds(workflow: Workflow): number {
@@ -352,6 +395,20 @@ export class ExecutionExecutor
       );
     }
   }
+}
+
+const MAX_SOURCE_CHAIN = 20;
+
+function toItems(
+  pinData: Record<string, Record<string, unknown>[]> | undefined,
+): Record<string, Item[]> | undefined {
+  if (!pinData || Object.keys(pinData).length === 0) return undefined;
+  return Object.fromEntries(
+    Object.entries(pinData).map(([nodeId, items]) => [
+      nodeId,
+      items.map((json) => ({ json: json as JsonObject })),
+    ]),
+  );
 }
 
 function toError(err: unknown): SerializedError {

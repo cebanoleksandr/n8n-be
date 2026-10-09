@@ -31,7 +31,11 @@ async function bootstrap() {
     AppModule.forRole(role),
   );
   const config = app.get<ConfigService<Env, true>>(ConfigService);
-  configureApp(app, config.get('CORS_ORIGINS', { infer: true }));
+  configureApp(
+    app,
+    config.get('CORS_ORIGINS', { infer: true }),
+    config.get('TRUST_PROXY', { infer: true }),
+  );
 
   const document = SwaggerModule.createDocument(
     app,

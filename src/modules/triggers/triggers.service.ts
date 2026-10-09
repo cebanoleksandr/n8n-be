@@ -203,7 +203,7 @@ export class TriggersService implements OnApplicationBootstrap {
  * Extracts enabled Webhook and Schedule nodes. With `strict`, invalid
  * parameters throw a 400; otherwise (reconciliation) invalid nodes are skipped.
  */
-function collectTriggers(
+export function collectTriggers(
   graph: WorkflowGraph,
   strict = true,
 ): { webhooks: WebhookTrigger[]; schedules: ScheduleTrigger[] } {

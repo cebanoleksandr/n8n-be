@@ -18,6 +18,14 @@ npm run start:dev                 # APP_ROLE=all: API + worker in one process; m
 - Webhooks: http://localhost:3000/webhook/&lt;path&gt;
 - WebSocket: socket.io namespace `/executions`
 
+## Running with Docker
+
+```bash
+docker compose --profile app up --build -d   # api on :3000 (APP_PORT) + worker, using .env secrets
+```
+
+One image (`Dockerfile`) serves both roles; only `api` runs migrations. `GET /api/health` is liveness, and `GET /api/health/ready` checks Postgres, Redis and S3 (503 when one is down). Behind a reverse proxy set `TRUST_PROXY` (for example `1` or `loopback,10.0.0.0/8`), otherwise login rate limiting sees the proxy's IP. CI (`.github/workflows/ci.yml`) runs lint, type check, unit and e2e tests, and builds the image. It needs npm 12, see `packageManager`.
+
 ## Process roles
 
 One codebase, selected by `APP_ROLE`:
@@ -56,6 +64,9 @@ BullMQ job scheduler (cron) ─┘                                              
   - **Webhook nodes** get rows in the `webhooks` table, written in the same transaction as the workflow save. Path conflicts return 409 and roll back the save.
   - **Schedule nodes** become BullMQ job schedulers in Redis (`schedule:<workflowId>:<nodeId>`). On startup the schedulers are reconciled against active workflows, and a worker that fires a stale scheduler removes it.
   - **Saving** an active workflow re-syncs its triggers. **Deactivating** or **deleting** it removes them.
+- **Editor runs**: `POST /run` accepts `destinationNodeId` (run only that node and what it depends on) and `runFromNodeId` (re-run from a node). In the second case the upstream outputs come from an earlier execution: `sourceExecutionId`, or by default the latest finished one, following chains of partial runs. **Pinned data** (`PUT /workflows/:id { pinData: { nodeId: [json…] } }`) replaces node execution in manual runs only. Steps report `pinned: true`.
+- **Test webhooks**: `POST /api/workflows/:id/test-webhook` listens for 2 minutes on `/webhook-test/<path>` for the saved workflow, without activating it. The first request is consumed and runs as a manual execution, so pinned data applies.
+- **History**: finished executions older than `EXECUTIONS_MAX_AGE_DAYS` (default 14, `0` keeps them) are deleted hourly together with their steps and files.
 - **Retries** are per node: `retryOnFail`, `maxTries` (≤ 10) and `waitBetweenTriesMs` on the graph node. `execution_steps.tries` records the attempts.
 - **Timeouts and cancel** share one AbortSignal per run. The timeout is `settings.timeoutSeconds`, capped by `EXECUTION_TIMEOUT_MAX_SECONDS`, and a timed-out run ends as `error` (`ExecutionTimeoutError`). `POST /api/executions/:id/cancel` cancels a queued run directly. For a running one the API publishes a cancel request over Redis, and the worker holding the run aborts it. The runner stops between nodes, during retry waits and mid-node: it stops waiting for the node's promise even if the node ignores the signal.
 - **Error workflows**: `settings.errorWorkflowId` points to a workflow with an **Error Trigger**. When a webhook or schedule run fails, that workflow is started with `{ execution: { id, mode, error, lastNodeExecuted, startedAt }, workflow: { id, name } }`. As in n8n, manual runs and failures of error workflows do not trigger it.
@@ -115,8 +126,13 @@ All `/api/*` routes need `Authorization: Bearer <token>` except setup, login, re
 | GET | `/api/node-types` | Node type descriptions |
 | GET, POST | `/api/workflows` | List (paginated) / create |
 | GET, PUT, DELETE | `/api/workflows/:id` | Read / update (`graph` → new version, `active` → (de)activate triggers, `settings` → `{ errorWorkflowId, timeoutSeconds }`, `null` clears) / delete |
-| GET | `/api/workflows/:id/versions` | Version history |
-| POST | `/api/workflows/:id/run` | Queue a run (202). `?wait=true` responds when finished (200, up to 60s). Body `{ input?: object[], startNodeId? }` |
+| GET | `/api/workflows/:id/versions[/:versionId]` | Version history / one version's graph |
+| POST | `/api/workflows/:id/versions/:versionId/restore` | Save an old graph as the newest version |
+| GET | `/api/workflows/:id/export` | Portable JSON (`flow-workflow@1`) |
+| POST | `/api/workflows/import` | Create from an export; unknown credential references are dropped |
+| POST, DELETE | `/api/workflows/:id/test-webhook` | Listen on / stop `/webhook-test/<path>` |
+| ANY | `/webhook-test/<path>` | One test request while the editor listens |
+| POST | `/api/workflows/:id/run` | Queue a run (202). `?wait=true` responds when finished (200, up to 60s). Body `{ input?, startNodeId?, destinationNodeId?, runFromNodeId?, sourceExecutionId? }` |
 | GET | `/api/executions?workflowId=&status=` | Execution history |
 | GET | `/api/executions/:id` | Execution with per-node output |
 | POST | `/api/executions/:id/cancel` | Cancel a queued/running execution (409 if finished) |
@@ -127,7 +143,7 @@ All `/api/*` routes need `Authorization: Bearer <token>` except setup, login, re
 | GET, POST | `/api/credentials` | List (`?type=`) / create |
 | GET, PUT, DELETE | `/api/credentials/:id` | Read (no secrets) / update (merge) / delete |
 | ANY | `/webhook/<path>` | Webhook triggers of active workflows |
-| GET | `/api/health` | DB health check |
+| GET | `/api/health`, `/api/health/ready` | Liveness / readiness (DB, Redis, S3) |
 
 ### Expressions
 

@@ -49,6 +49,13 @@ export class Workflow {
   @Column({ type: 'jsonb', default: {} })
   settings: WorkflowSettings;
 
+  /**
+   * Editor test data: node id -> JSON items used instead of executing that
+   * node in manual runs. Not versioned; production runs ignore it.
+   */
+  @Column({ name: 'pin_data', type: 'jsonb', default: {} })
+  pinData: Record<string, Record<string, unknown>[]>;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;
 

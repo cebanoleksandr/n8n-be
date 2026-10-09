@@ -7,10 +7,15 @@ import type { Server, ServerOptions } from 'socket.io';
 export function configureApp(
   app: NestExpressApplication,
   corsOrigins: string[] = [],
+  trustProxy: boolean | number | string = false,
 ): void {
-  // Webhooks are public URLs: /webhook/<path>, outside the /api prefix.
+  app.set('trust proxy', trustProxy);
+  // Webhooks are public URLs: /webhook/<path> and /webhook-test/<path>, outside /api.
   app.setGlobalPrefix('api', {
-    exclude: [{ path: 'webhook/*path', method: RequestMethod.ALL }],
+    exclude: [
+      { path: 'webhook/*path', method: RequestMethod.ALL },
+      { path: 'webhook-test/*path', method: RequestMethod.ALL },
+    ],
   });
   // Workflow graphs and run inputs can exceed the 100kb default.
   app.useBodyParser('json', { limit: '5mb' });

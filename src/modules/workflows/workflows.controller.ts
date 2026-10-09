@@ -25,6 +25,8 @@ import { ZodValidationPipe } from '../../common/zod-validation.pipe.js';
 import {
   CreateWorkflowDto,
   createWorkflowSchema,
+  importWorkflowSchema,
+  type WorkflowImport,
   UpdateWorkflowDto,
   updateWorkflowSchema,
   WorkflowDto,
@@ -96,5 +98,43 @@ export class WorkflowsController {
     @Param('id', ParseUUIDPipe) id: string,
   ): Promise<WorkflowVersionDto[]> {
     return this.service.listVersions(auth.workspaceId, id);
+  }
+
+  @Get(':id/versions/:versionId')
+  version(
+    @Auth() auth: AuthContext,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('versionId', ParseUUIDPipe) versionId: string,
+  ) {
+    return this.service.getVersion(auth.workspaceId, id, versionId);
+  }
+
+  /** Saves the old graph as a new version. */
+  @Post(':id/versions/:versionId/restore')
+  @MinRole('editor')
+  @HttpCode(200)
+  @ApiOkResponse({ type: WorkflowDto })
+  restore(
+    @Auth() auth: AuthContext,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('versionId', ParseUUIDPipe) versionId: string,
+  ): Promise<WorkflowDto> {
+    return this.service.restoreVersion(auth.workspaceId, id, versionId);
+  }
+
+  @Get(':id/export')
+  export(@Auth() auth: AuthContext, @Param('id', ParseUUIDPipe) id: string) {
+    return this.service.export(auth.workspaceId, id);
+  }
+
+  @Post('import')
+  @MinRole('editor')
+  @ApiBody({ description: 'Output of GET /workflows/:id/export' })
+  @ApiOkResponse({ type: WorkflowDto })
+  import(
+    @Auth() auth: AuthContext,
+    @Body(new ZodValidationPipe(importWorkflowSchema)) dto: WorkflowImport,
+  ): Promise<WorkflowDto> {
+    return this.service.import(auth.workspaceId, dto);
   }
 }

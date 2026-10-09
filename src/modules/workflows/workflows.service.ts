@@ -6,15 +6,21 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { isDeepStrictEqual } from 'node:util';
-import { DataSource, type EntityManager, Repository } from 'typeorm';
+import { DataSource, type EntityManager, In, Repository } from 'typeorm';
 import { EMPTY_GRAPH, validateGraph } from '../../engine/graph.js';
 import { NodeRegistry } from '../../engine/node-registry.js';
 import type { WorkflowGraph } from '../../engine/types.js';
 import type { Page, Pagination } from '../../common/pagination.js';
 import type { Env } from '../../config/env.js';
+import { Credential } from '../credentials/credential.entity.js';
 import { TriggersService } from '../triggers/triggers.service.js';
 import { WorkflowVersion } from './workflow-version.entity.js';
 import { Workflow, type WorkflowSettings } from './workflow.entity.js';
+import {
+  EXPORT_FORMAT,
+  type WorkflowExport,
+  type WorkflowImport,
+} from './workflows.dto.js';
 import type {
   CreateWorkflowDto,
   UpdateWorkflowDto,
@@ -68,6 +74,7 @@ export class WorkflowsService {
           name: dto.name,
           active: false,
           settings: {},
+          pinData: {},
         }),
       );
       const version = await this.addVersion(em, workflow, 1, graph);
@@ -101,6 +108,7 @@ export class WorkflowsService {
         );
       }
       if (dto.name !== undefined) workflow.name = dto.name;
+      if (dto.pinData) workflow.pinData = dto.pinData;
       if (dto.settings) {
         workflow.settings = await this.mergeSettings(
           em,
@@ -139,6 +147,95 @@ export class WorkflowsService {
       where: { workflowId: id },
       order: { version: 'DESC' },
     });
+  }
+
+  async getVersion(
+    workspaceId: string,
+    id: string,
+    versionId: string,
+  ): Promise<WorkflowVersionDto & { graph: WorkflowGraph }> {
+    await this.findOrFail(workspaceId, id);
+    const version = await this.versions.findOneBy({
+      id: versionId,
+      workflowId: id,
+    });
+    if (!version) throw new NotFoundException(`Version ${versionId} not found`);
+    return {
+      id: version.id,
+      version: version.version,
+      createdAt: version.createdAt,
+      graph: version.graph,
+    };
+  }
+
+  /** Saves an old graph as the newest version (history is never rewritten). */
+  async restoreVersion(
+    workspaceId: string,
+    id: string,
+    versionId: string,
+  ): Promise<WorkflowDto> {
+    const { graph } = await this.getVersion(workspaceId, id, versionId);
+    return this.update(workspaceId, id, { graph });
+  }
+
+  async export(workspaceId: string, id: string): Promise<WorkflowExport> {
+    const workflow = await this.findOrFail(workspaceId, id);
+    const version = await this.currentVersion(workflow);
+    return {
+      format: EXPORT_FORMAT,
+      name: workflow.name,
+      graph: version.graph,
+      // The error workflow id only means something in this workspace.
+      settings: workflow.settings.timeoutSeconds
+        ? { timeoutSeconds: workflow.settings.timeoutSeconds }
+        : {},
+      pinData: workflow.pinData,
+    };
+  }
+
+  /**
+   * Creates a workflow from an export. Credential references that do not
+   * exist in this workspace are dropped, so the nodes ask for new ones.
+   */
+  async import(
+    workspaceId: string,
+    data: WorkflowImport,
+  ): Promise<WorkflowDto> {
+    const referenced = data.graph.nodes.flatMap((n) =>
+      Object.values(n.credentials ?? {}),
+    );
+    const known = new Set(
+      referenced.length
+        ? (
+            await this.dataSource.manager.find(Credential, {
+              select: { id: true },
+              where: { workspaceId, id: In(referenced) },
+            })
+          ).map((c) => c.id)
+        : [],
+    );
+    const graph: WorkflowGraph = {
+      ...data.graph,
+      nodes: data.graph.nodes.map((n) => {
+        if (!n.credentials) return n;
+        const credentials = Object.fromEntries(
+          Object.entries(n.credentials).filter(([, credId]) =>
+            known.has(credId),
+          ),
+        );
+        return { ...n, credentials };
+      }),
+    };
+    const created = await this.create(workspaceId, { name: data.name, graph });
+    if (data.settings?.timeoutSeconds || data.pinData) {
+      return this.update(workspaceId, created.id, {
+        ...(data.settings?.timeoutSeconds && {
+          settings: { timeoutSeconds: data.settings.timeoutSeconds },
+        }),
+        ...(data.pinData && { pinData: data.pinData }),
+      });
+    }
+    return created;
   }
 
   /** Used by executions: the workflow and the version to run. */
@@ -260,6 +357,7 @@ function toDto(w: Workflow, v: WorkflowVersion): WorkflowDto {
   return {
     ...toSummary(w),
     settings: w.settings,
+    pinData: w.pinData,
     versionId: v.id,
     version: v.version,
     graph: v.graph,

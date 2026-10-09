@@ -12,11 +12,19 @@ import {
 
 const STATUSES = EXECUTION_STATUSES;
 
-export const runWorkflowSchema = z.object({
-  startNodeId: z.string().optional(),
-  /** JSON objects handed to the trigger node as items. */
-  input: z.array(z.record(z.string(), z.unknown())).optional(),
-});
+export const runWorkflowSchema = z
+  .object({
+    startNodeId: z.string().optional(),
+    /** JSON objects handed to the trigger node as items. */
+    input: z.array(z.record(z.string(), z.unknown())).optional(),
+    destinationNodeId: z.string().optional(),
+    runFromNodeId: z.string().optional(),
+    sourceExecutionId: z.uuid().optional(),
+  })
+  .refine(
+    (v) => !(v.runFromNodeId && v.startNodeId),
+    'Use either startNodeId (a trigger) or runFromNodeId',
+  );
 
 export class RunWorkflowDto {
   @ApiPropertyOptional({
@@ -32,6 +40,23 @@ export class RunWorkflowDto {
     example: [{ name: 'Ann' }],
   })
   input?: JsonObject[];
+
+  @ApiPropertyOptional({
+    description: 'Run only this node and the nodes it depends on',
+  })
+  destinationNodeId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Re-run from this node, feeding it the outputs of an earlier run (pinned data applies)',
+  })
+  runFromNodeId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Earlier execution whose outputs feed runFromNodeId. Defaults to the latest finished one',
+  })
+  sourceExecutionId?: string;
 }
 
 export const runQuerySchema = z.object({
@@ -89,6 +114,8 @@ export class ExecutionStepDto {
   @ApiProperty({ type: ExecutionErrorDto, nullable: true })
   error: ExecutionErrorDto | null;
   @ApiProperty({ description: 'Attempts made (retryOnFail)' }) tries: number;
+  @ApiProperty({ description: 'Output came from pinned test data' })
+  pinned: boolean;
   @ApiProperty() startedAt: Date;
   @ApiProperty() finishedAt: Date;
 }

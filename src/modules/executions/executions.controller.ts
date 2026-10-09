@@ -64,6 +64,9 @@ export class ExecutionsController {
       mode: 'manual',
       startNodeId: dto.startNodeId,
       input: dto.input,
+      destinationNodeId: dto.destinationNodeId,
+      runFromNodeId: dto.runFromNodeId,
+      sourceExecutionId: dto.sourceExecutionId,
     });
     if (query.wait) {
       res.status(200);

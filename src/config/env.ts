@@ -25,6 +25,8 @@ export const envSchema = z.object({
       'must be 32 bytes encoded as base64 (openssl rand -base64 32)',
     ),
   EXECUTION_TIMEOUT_MAX_SECONDS: z.coerce.number().int().min(1).default(3600),
+  /** Finished executions older than this are deleted hourly; 0 keeps them forever. */
+  EXECUTIONS_MAX_AGE_DAYS: z.coerce.number().int().min(0).default(14),
   S3_ENDPOINT: z.url().optional(),
   S3_REGION: z.string().default('us-east-1'),
   S3_BUCKET: z.string().min(3).default('flow-binary-data'),
@@ -40,6 +42,23 @@ export const envSchema = z.object({
   JWT_SECRET: z.string().min(32, 'must be at least 32 characters'),
   ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().min(60).default(900),
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().min(1).default(30),
+  /**
+   * Express "trust proxy": set when running behind a reverse proxy so client
+   * IPs (login rate limits) come from X-Forwarded-For. "false" (default),
+   * "true", a hop count, or a list of subnets such as "loopback,10.0.0.0/8".
+   */
+  TRUST_PROXY: z
+    .string()
+    .default('false')
+    .transform((v): boolean | number | string =>
+      v === 'true'
+        ? true
+        : v === 'false'
+          ? false
+          : /^\d+$/.test(v)
+            ? Number(v)
+            : v,
+    ),
   CORS_ORIGINS: z
     .string()
     .default('http://localhost:5173')

@@ -1,5 +1,6 @@
 import { InjectQueue } from '@nestjs/bullmq';
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   Logger,
@@ -8,7 +9,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import type { Queue } from 'bullmq';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import type { Page } from '../../common/pagination.js';
 import type { BinaryRef, JsonObject } from '../../engine/types.js';
 import { JOB_RUN, type RunJobData, WORKFLOW_QUEUE } from '../../queue/queue.js';
@@ -18,6 +19,7 @@ import { ExecutionStep } from './execution-step.entity.js';
 import {
   Execution,
   type ExecutionMode,
+  type ExecutionRunOptions,
   isFinished,
 } from './execution.entity.js';
 import type {
@@ -38,6 +40,10 @@ export interface StartExecutionOptions {
   binary?: Record<string, BinaryRef>[];
   /** false: the caller runs it itself (scheduled triggers already are on a worker). */
   enqueue?: boolean;
+  /** Manual partial runs. */
+  destinationNodeId?: string;
+  runFromNodeId?: string;
+  sourceExecutionId?: string;
 }
 
 @Injectable()
@@ -64,6 +70,7 @@ export class ExecutionsService {
       workspaceId,
       workflowId,
     );
+    const runOptions = await this.resolveRunOptions(workflow.id, options);
     const execution = await this.executions.save(
       this.executions.create({
         workspaceId: workflow.workspaceId,
@@ -72,6 +79,7 @@ export class ExecutionsService {
         status: 'queued',
         mode: options.mode,
         startNodeId: options.startNodeId ?? null,
+        runOptions,
         input:
           options.input?.map((json, i) => {
             const binary = options.binary?.[i];
@@ -105,6 +113,38 @@ export class ExecutionsService {
       }
     }
     return execution;
+  }
+
+  private async resolveRunOptions(
+    workflowId: string,
+    options: StartExecutionOptions,
+  ): Promise<ExecutionRunOptions | null> {
+    const { destinationNodeId, runFromNodeId } = options;
+    if (!destinationNodeId && !runFromNodeId) return null;
+    if (!runFromNodeId) return { destinationNodeId };
+
+    const source = await this.executions.findOne({
+      select: { id: true },
+      where: {
+        workflowId,
+        ...(options.sourceExecutionId
+          ? { id: options.sourceExecutionId }
+          : { status: In(['success', 'error']) }),
+      },
+      order: { createdAt: 'DESC' },
+    });
+    if (!source) {
+      throw new BadRequestException(
+        options.sourceExecutionId
+          ? `Execution ${options.sourceExecutionId} not found in this workflow`
+          : 'No earlier execution to run from: run the workflow first',
+      );
+    }
+    return {
+      ...(destinationNodeId && { destinationNodeId }),
+      runFromNodeId,
+      sourceExecutionId: source.id,
+    };
   }
 
   /**
@@ -239,6 +279,7 @@ function toStepDto(s: ExecutionStep): ExecutionStepDto {
     output: s.output,
     error: s.error,
     tries: s.tries,
+    pinned: s.pinned,
     startedAt: s.startedAt,
     finishedAt: s.finishedAt,
   };

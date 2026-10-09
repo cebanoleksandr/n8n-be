@@ -53,6 +53,15 @@ export class ExecutionEventsService implements OnModuleDestroy {
     );
   }
 
+  /** Throws when Redis is unreachable (readiness check). */
+  async ping(): Promise<void> {
+    this.publisher ??= new Redis({
+      ...this.redisOptions(),
+      maxRetriesPerRequest: 3,
+    });
+    await this.publisher.ping();
+  }
+
   async onModuleDestroy(): Promise<void> {
     await Promise.all([this.publisher?.quit(), this.subscriber?.quit()]);
   }

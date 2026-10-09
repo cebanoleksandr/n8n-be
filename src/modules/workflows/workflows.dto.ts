@@ -36,6 +36,20 @@ export class CreateWorkflowDto implements z.infer<typeof createWorkflowSchema> {
   graph?: WorkflowGraph;
 }
 
+const MAX_PIN_ITEMS = 1000;
+const MAX_PIN_BYTES = 2 * 1024 * 1024;
+
+/** Replaces all pinned data; {} unpins everything. */
+export const pinDataSchema = z
+  .record(
+    z.string().min(1).max(64),
+    z.array(z.record(z.string(), z.unknown())).max(MAX_PIN_ITEMS),
+  )
+  .refine(
+    (v) => JSON.stringify(v).length <= MAX_PIN_BYTES,
+    `Pinned data must be smaller than ${MAX_PIN_BYTES / 1024 / 1024} MB`,
+  );
+
 /** null clears a setting; omitted keeps it. */
 export const settingsPatchSchema = z.object({
   errorWorkflowId: z.uuid().nullable().optional(),
@@ -64,6 +78,7 @@ export const updateWorkflowSchema = z
     active: z.boolean().optional(),
     graph: workflowGraphSchema.optional(),
     settings: settingsPatchSchema.optional(),
+    pinData: pinDataSchema.optional(),
   })
   .refine((v) => Object.keys(v).length > 0, 'Nothing to update');
 
@@ -82,6 +97,14 @@ export class UpdateWorkflowDto implements z.infer<typeof updateWorkflowSchema> {
 
   @ApiPropertyOptional({ type: WorkflowSettingsDto })
   settings?: WorkflowSettingsDto;
+
+  @ApiPropertyOptional({
+    description:
+      'Node id -> JSON items used instead of executing the node in manual runs. Replaces all pinned data.',
+    type: 'object',
+    additionalProperties: { type: 'array', items: { type: 'object' } },
+  })
+  pinData?: Record<string, Record<string, unknown>[]>;
 }
 
 export class WorkflowSummaryDto {
@@ -94,9 +117,36 @@ export class WorkflowSummaryDto {
 
 export class WorkflowDto extends WorkflowSummaryDto {
   @ApiProperty({ type: WorkflowSettingsDto }) settings: WorkflowSettingsDto;
+  @ApiProperty({
+    type: 'object',
+    additionalProperties: { type: 'array', items: { type: 'object' } },
+  })
+  pinData: Record<string, Record<string, unknown>[]>;
   @ApiProperty() versionId: string;
   @ApiProperty() version: number;
   @ApiProperty(graphApiProperty) graph: WorkflowGraph;
+}
+
+export const EXPORT_FORMAT = 'flow-workflow@1';
+
+export const importWorkflowSchema = z.object({
+  format: z.literal(EXPORT_FORMAT).optional(),
+  name: z.string().trim().min(1).max(128),
+  graph: workflowGraphSchema,
+  settings: z
+    .object({ timeoutSeconds: z.number().int().min(1).optional() })
+    .optional(),
+  pinData: pinDataSchema.optional(),
+});
+
+export type WorkflowImport = z.infer<typeof importWorkflowSchema>;
+
+export interface WorkflowExport {
+  format: typeof EXPORT_FORMAT;
+  name: string;
+  graph: WorkflowGraph;
+  settings: { timeoutSeconds?: number };
+  pinData: Record<string, Record<string, unknown>[]>;
 }
 
 export class WorkflowVersionDto {
