@@ -88,6 +88,7 @@ export class ExecutionStepDto {
   output: StoredItem[][];
   @ApiProperty({ type: ExecutionErrorDto, nullable: true })
   error: ExecutionErrorDto | null;
+  @ApiProperty({ description: 'Attempts made (retryOnFail)' }) tries: number;
   @ApiProperty() startedAt: Date;
   @ApiProperty() finishedAt: Date;
 }

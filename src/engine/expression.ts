@@ -1,26 +1,26 @@
 import { ExpressionError } from './errors.js';
-import type { Item, JsonObject } from './types.js';
+import { evaluateAst, type ExpressionData } from './expression/evaluator.js';
+import { toText } from './expression/library.js';
+import { parseExpression } from './expression/parser.js';
 
 /**
- * Minimal, eval-free expression language for node parameters.
+ * Expression language for node parameters. Safe by construction: it is parsed
+ * into an AST and interpreted; there is no eval and no access to JS globals,
+ * prototypes or functions other than the whitelisted library.
  *
- *   {{ $json.user.email }}              field of the current input item
- *   {{ $json["first name"] }}           bracket access, also [0] for arrays
- *   {{ $node["HTTP Request"].json.id }} output of an earlier node (same item index, else first item)
- *   {{ $itemIndex }}, {{ $now }}
+ *   {{ $json.user.email }}                       fields; also ["first name"], [0]
+ *   {{ $json.price * 1.2 }}                      + - * / %, comparisons, && || ?? !, a ? b : c
+ *   {{ $json.name.toUpperCase() }}               whitelisted methods
+ *   {{ $json.items.filter(i => i.qty > 0) }}     arrow functions in array methods
+ *   {{ round($json.total, 2) }}                  global functions
+ *   {{ $node["HTTP Request"].json.id }}          earlier node output (paired item)
+ *   {{ $binary.data.fileName }}, $itemIndex, $now, $today, $workflow, $execution
  *
  * A parameter that is exactly one expression keeps the resolved value's type;
  * otherwise expressions are interpolated into the string.
  */
-export interface ExpressionData {
-  json: JsonObject;
-  itemIndex: number;
-  /** Items emitted by a previously executed node on its first output. */
-  nodeOutput(nodeName: string): Item[] | undefined;
-}
-
-const EXPRESSION = /\{\{(.*?)\}\}/gs;
-const SINGLE_EXPRESSION = /^\s*\{\{(.*?)\}\}\s*$/s;
+export type { ExpressionData };
+export { toText };
 
 export function resolveParameter(
   value: unknown,
@@ -36,104 +36,78 @@ export function resolveParameter(
   return value;
 }
 
+export function evaluate(source: string, data: ExpressionData): unknown {
+  try {
+    return evaluateAst(parseExpression(source.trim()), data);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new ExpressionError(`${message} in "{{ ${source.trim()} }}"`, source);
+  }
+}
+
 function resolveString(value: string, data: ExpressionData): unknown {
   if (!value.includes('{{')) return value;
-  const single = SINGLE_EXPRESSION.exec(value);
-  if (single && !single[1].includes('{{')) {
-    return evaluate(single[1], data) ?? null;
+  const segments = splitTemplate(value);
+  if (segments.length === 1 && typeof segments[0] !== 'string') {
+    return evaluate(segments[0].expression, data) ?? null;
   }
-  return value.replace(EXPRESSION, (_, expr: string) =>
-    toText(evaluate(expr, data)),
+  return segments
+    .map((s) =>
+      typeof s === 'string' ? s : toText(evaluate(s.expression, data)),
+    )
+    .join('');
+}
+
+type Segment = string | { expression: string };
+
+/**
+ * Splits "a {{ x }} b" into text and expression segments. Scans quotes and
+ * braces so "}}" inside a string or an object literal does not end the expression.
+ * Whitespace around a lone expression is ignored so "{{ x }} " keeps its type.
+ */
+function splitTemplate(value: string): Segment[] {
+  const segments: Segment[] = [];
+  let text = '';
+  let i = 0;
+  while (i < value.length) {
+    if (!value.startsWith('{{', i)) {
+      text += value[i++];
+      continue;
+    }
+    const end = findClose(value, i + 2);
+    if (end === -1) {
+      throw new ExpressionError('Missing "}}"', value);
+    }
+    if (text) segments.push(text);
+    text = '';
+    segments.push({ expression: value.slice(i + 2, end) });
+    i = end + 2;
+  }
+  if (text) segments.push(text);
+  const meaningful = segments.filter(
+    (s) => typeof s !== 'string' || s.trim() !== '',
   );
+  return meaningful.length === 1 && typeof meaningful[0] !== 'string'
+    ? meaningful
+    : segments;
 }
 
-/** Text form of a value: '' for null/undefined, JSON for objects. */
-export function toText(value: unknown): string {
-  if (value === undefined || value === null) return '';
-  if (typeof value === 'object') return JSON.stringify(value);
-  return String(value);
-}
-
-export function evaluate(source: string, data: ExpressionData): unknown {
-  return new Parser(source.trim(), data).parse();
-}
-
-class Parser {
-  private pos = 0;
-
-  constructor(
-    private readonly src: string,
-    private readonly data: ExpressionData,
-  ) {}
-
-  parse(): unknown {
-    let value = this.root();
-    while (this.pos < this.src.length) {
-      value = this.accessor(value);
-    }
-    return value;
-  }
-
-  private root(): unknown {
-    const name = this.identifier();
-    switch (name) {
-      case '$json':
-        return this.data.json;
-      case '$itemIndex':
-        return this.data.itemIndex;
-      case '$now':
-        return new Date().toISOString();
-      case '$node': {
-        const nodeName = this.bracketKey();
-        if (typeof nodeName !== 'string')
-          this.fail('Expected a node name, e.g. $node["Name"]');
-        const items = this.data.nodeOutput(nodeName);
-        if (!items) this.fail(`Node "${nodeName}" has not produced any data`);
-        const item = items[this.data.itemIndex] ?? items[0];
-        return item ? { json: item.json } : undefined;
-      }
-      default:
-        this.fail(`Unknown variable "${name}"`);
+function findClose(value: string, from: number): number {
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = from; i < value.length; i++) {
+    const ch = value[i];
+    if (quote) {
+      if (ch === '\\') i++;
+      else if (ch === quote) quote = null;
+    } else if (ch === '"' || ch === "'" || ch === '`') {
+      quote = ch;
+    } else if (ch === '{') {
+      depth++;
+    } else if (ch === '}') {
+      if (depth === 0 && value[i + 1] === '}') return i;
+      depth = Math.max(0, depth - 1);
     }
   }
-
-  private accessor(target: unknown): unknown {
-    const ch = this.src[this.pos];
-    let key: string | number;
-    if (ch === '.') {
-      this.pos++;
-      key = this.identifier();
-    } else if (ch === '[') {
-      key = this.bracketKey();
-    } else {
-      this.fail(`Unexpected "${ch}"`);
-    }
-    if (target === null || typeof target !== 'object') return undefined;
-    return (target as Record<string | number, unknown>)[key];
-  }
-
-  private identifier(): string {
-    const match = /^\$?[A-Za-z_][A-Za-z0-9_]*/.exec(this.src.slice(this.pos));
-    if (!match) this.fail('Expected an identifier');
-    this.pos += match[0].length;
-    return match[0];
-  }
-
-  private bracketKey(): string | number {
-    const match =
-      /^\[\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|(\d+))\s*\]/.exec(
-        this.src.slice(this.pos),
-      );
-    if (!match) this.fail('Expected ["key"] or [index]');
-    this.pos += match[0].length;
-    if (match[3] !== undefined) return Number(match[3]);
-    return (match[1] ?? match[2]).replace(/\\(.)/g, '$1');
-  }
-
-  private fail(message: string): never {
-    throw new ExpressionError(
-      `${message} at position ${this.pos} in "{{ ${this.src} }}"`,
-      this.src,
-    );
-  }
+  return -1;
 }

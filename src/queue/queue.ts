@@ -7,6 +7,9 @@ export const WORKFLOW_QUEUE = 'workflows';
 export const JOB_RUN = 'run';
 /** Fired by a BullMQ job scheduler for a Schedule trigger node. */
 export const JOB_SCHEDULED_TRIGGER = 'scheduled-trigger';
+/** Hourly: delete stored files whose workflow was deleted. */
+export const JOB_BINARY_CLEANUP = 'binary-cleanup';
+export const BINARY_CLEANUP_SCHEDULER = 'maintenance:binary-cleanup';
 
 export interface RunJobData {
   executionId: string;

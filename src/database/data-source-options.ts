@@ -1,4 +1,5 @@
 import type { DataSourceOptions } from 'typeorm';
+import { BinaryData } from '../modules/binary-data/binary-data.entity.js';
 import { Credential } from '../modules/credentials/credential.entity.js';
 import { ExecutionStep } from '../modules/executions/execution-step.entity.js';
 import { Execution } from '../modules/executions/execution.entity.js';
@@ -17,6 +18,7 @@ export const entities = [
   ExecutionStep,
   Credential,
   Webhook,
+  BinaryData,
 ];
 
 export function dataSourceOptions(env: {

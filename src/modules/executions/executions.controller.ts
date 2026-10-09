@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  HttpCode,
   Param,
   ParseUUIDPipe,
   Post,
@@ -11,6 +12,7 @@ import {
 import {
   ApiAcceptedResponse,
   ApiBody,
+  ApiConflictResponse,
   ApiOkResponse,
   ApiQuery,
   ApiTags,
@@ -71,6 +73,17 @@ export class ExecutionsController {
     query: ListExecutionsQuery,
   ): Promise<Page<ExecutionSummaryDto>> {
     return this.service.list(query);
+  }
+
+  @Post('executions/:id/cancel')
+  @HttpCode(200)
+  @ApiOkResponse({
+    type: ExecutionDto,
+    description: 'Status is "canceled" once the worker stopped the run',
+  })
+  @ApiConflictResponse({ description: 'Execution already finished' })
+  cancel(@Param('id', ParseUUIDPipe) id: string): Promise<ExecutionDto> {
+    return this.service.cancel(id);
   }
 
   @Get('executions/:id')

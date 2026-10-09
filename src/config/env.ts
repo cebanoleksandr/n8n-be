@@ -24,6 +24,18 @@ export const envSchema = z.object({
       (v) => Buffer.from(v, 'base64').length === 32,
       'must be 32 bytes encoded as base64 (openssl rand -base64 32)',
     ),
+  EXECUTION_TIMEOUT_MAX_SECONDS: z.coerce.number().int().min(1).default(3600),
+  S3_ENDPOINT: z.url().optional(),
+  S3_REGION: z.string().default('us-east-1'),
+  S3_BUCKET: z.string().min(3).default('flow-binary-data'),
+  S3_ACCESS_KEY: z.string().min(1),
+  S3_SECRET_KEY: z.string().min(1),
+  S3_FORCE_PATH_STYLE: booleanString.default(true),
+  BINARY_MAX_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(50 * 1024 * 1024),
   CORS_ORIGINS: z
     .string()
     .default('http://localhost:5173')

@@ -4,10 +4,12 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { type AppRole, type Env, validateEnv } from './config/env.js';
 import { dataSourceOptions } from './database/data-source-options.js';
+import { BinaryDataModule } from './modules/binary-data/binary-data.module.js';
 import { CredentialsModule } from './modules/credentials/credentials.module.js';
 import { EventsModule } from './modules/events/execution-events.service.js';
 import { RealtimeModule } from './modules/events/realtime.gateway.js';
 import { ExecutionsModule } from './modules/executions/executions.module.js';
+import { ExpressionsModule } from './modules/expressions/expressions.module.js';
 import { HealthController } from './modules/health/health.controller.js';
 import { NodeTypesModule } from './modules/node-types/node-types.module.js';
 import { WebhooksModule } from './modules/webhooks/webhooks.controller.js';
@@ -55,9 +57,12 @@ export class AppModule {
         EventsModule,
         NodeTypesModule,
         CredentialsModule,
+        BinaryDataModule,
         WorkflowsModule,
         ExecutionsModule,
-        ...(serveHttp ? [WebhooksModule, RealtimeModule] : []),
+        ...(serveHttp
+          ? [WebhooksModule, RealtimeModule, ExpressionsModule]
+          : []),
         ...(runWorker ? [WorkerModule] : []),
       ],
       controllers: serveHttp ? [HealthController] : [],

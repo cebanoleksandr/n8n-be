@@ -6,6 +6,27 @@ export type JsonObject = { [key: string]: JsonValue };
 /** Unit of data passed between nodes. Every node receives and emits arrays of items. */
 export interface Item {
   json: JsonObject;
+  /** Files attached to the item, by property name (e.g. "data"). Content lives in object storage. */
+  binary?: Record<string, BinaryRef>;
+}
+
+/** Reference to a stored file. Items carry only this, never the bytes. */
+export interface BinaryRef {
+  id: string;
+  fileName?: string;
+  mimeType: string;
+  size: number;
+}
+
+export interface BinaryMeta {
+  fileName?: string;
+  mimeType: string;
+}
+
+/** Object storage for item files, scoped to the current execution by the caller. */
+export interface BinaryStore {
+  put(data: Buffer, meta: BinaryMeta): Promise<BinaryRef>;
+  get(ref: BinaryRef): Promise<Buffer>;
 }
 
 // ---------------------------------------------------------------------------
@@ -24,6 +45,10 @@ export interface WorkflowNode {
   disabled?: boolean;
   /** Selected credentials: credential type -> credential id. */
   credentials?: Record<string, string>;
+  /** Re-run the node when it throws, up to maxTries attempts in total. */
+  retryOnFail?: boolean;
+  maxTries?: number;
+  waitBetweenTriesMs?: number;
 }
 
 export interface ConnectionEndpoint {
@@ -116,14 +141,14 @@ export interface HttpRequestOptions {
   method: string;
   url: string;
   headers?: Record<string, string>;
-  body?: string;
+  body?: string | Buffer;
   timeoutMs?: number;
 }
 
 export interface HttpResponse {
   status: number;
   headers: Record<string, string>;
-  body: string;
+  body: Buffer;
 }
 
 export interface NodeExecuteContext {
@@ -136,6 +161,9 @@ export interface NodeExecuteContext {
   getCredentials<T = Record<string, unknown>>(type: string): Promise<T>;
   helpers: {
     httpRequest(options: HttpRequestOptions): Promise<HttpResponse>;
+    /** Store a file and get a reference to attach to an item's `binary`. */
+    storeBinary(data: Buffer, meta: BinaryMeta): Promise<BinaryRef>;
+    readBinary(ref: BinaryRef): Promise<Buffer>;
   };
 }
 

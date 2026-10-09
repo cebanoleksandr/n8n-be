@@ -1,12 +1,15 @@
 import { All, Controller, Module, Param, Req, Res } from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
-import type { JsonObject } from '../../engine/types.js';
+import type { BinaryRef, JsonObject } from '../../engine/types.js';
 import { normalizeWebhookPath } from '../../nodes/core/webhook.node.js';
+import { BinaryDataModule } from '../binary-data/binary-data.module.js';
+import { BinaryDataService } from '../binary-data/binary-data.service.js';
 import { ExecutionsModule } from '../executions/executions.module.js';
 import { ExecutionsService } from '../executions/executions.service.js';
 import { TriggersModule } from '../triggers/triggers.module.js';
 import { TriggersService } from '../triggers/triggers.service.js';
+import { receiveFiles } from './webhook-uploads.js';
 
 /** How long a "respond when finished" webhook waits before answering 202. */
 const RESPONSE_TIMEOUT_MS = 30_000;
@@ -18,6 +21,7 @@ export class WebhooksController {
   constructor(
     private readonly triggers: TriggersService,
     private readonly executions: ExecutionsService,
+    private readonly binaryData: BinaryDataService,
   ) {}
 
   @All('*path')
@@ -39,6 +43,20 @@ export class WebhooksController {
       return;
     }
 
+    // Files are stored before the execution exists and linked to it afterwards.
+    const files = await receiveFiles(req, res, this.binaryData.maxBytes);
+    const binary: Record<string, BinaryRef> = {};
+    for (const file of files) {
+      binary[file.field] = await this.binaryData.put(
+        {
+          workspaceId: webhook.workflow!.workspaceId,
+          workflowId: webhook.workflowId,
+        },
+        file.data,
+        { fileName: file.fileName, mimeType: file.mimeType },
+      );
+    }
+
     const execution = await this.executions.start(webhook.workflowId, {
       mode: 'webhook',
       startNodeId: webhook.nodeId,
@@ -51,7 +69,14 @@ export class WebhooksController {
           body: (req.body ?? null) as JsonObject,
         },
       ],
+      binary: files.length > 0 ? [binary] : undefined,
     });
+    if (files.length > 0) {
+      await this.binaryData.linkExecution(
+        Object.values(binary).map((b) => b.id),
+        execution.id,
+      );
+    }
 
     if (webhook.responseMode !== 'lastNode') {
       res.status(202).json({ executionId: execution.id });
@@ -81,7 +106,7 @@ export class WebhooksController {
 }
 
 @Module({
-  imports: [ExecutionsModule, TriggersModule],
+  imports: [ExecutionsModule, TriggersModule, BinaryDataModule],
   controllers: [WebhooksController],
 })
 export class WebhooksModule {}

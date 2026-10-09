@@ -22,7 +22,13 @@ export const EXECUTION_STATUSES = [
   'canceled',
 ] as const;
 export type ExecutionStatus = (typeof EXECUTION_STATUSES)[number];
-export const EXECUTION_MODES = ['manual', 'webhook', 'schedule'] as const;
+export const EXECUTION_MODES = [
+  'manual',
+  'webhook',
+  'schedule',
+  /** Started by an Error Trigger because another run failed. */
+  'error',
+] as const;
 export type ExecutionMode = (typeof EXECUTION_MODES)[number];
 
 export function isFinished(status: ExecutionStatus): boolean {

@@ -1,15 +1,23 @@
-import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
+import {
+  InjectQueue,
+  OnWorkerEvent,
+  Processor,
+  WorkerHost,
+} from '@nestjs/bullmq';
 import { Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import type { Job } from 'bullmq';
+import type { Job, Queue } from 'bullmq';
 import type { Env } from '../../config/env.js';
 import {
+  BINARY_CLEANUP_SCHEDULER,
+  JOB_BINARY_CLEANUP,
   JOB_RUN,
   JOB_SCHEDULED_TRIGGER,
   type RunJobData,
   type ScheduledTriggerJobData,
   WORKFLOW_QUEUE,
 } from '../../queue/queue.js';
+import { BinaryDataService } from '../binary-data/binary-data.service.js';
 import { ExecutionExecutor } from './execution-executor.service.js';
 
 // maxStalledCount 0: a job whose worker died is failed instead of re-run,
@@ -23,12 +31,19 @@ export class WorkflowProcessor
 
   constructor(
     private readonly executor: ExecutionExecutor,
+    private readonly binaryData: BinaryDataService,
     private readonly config: ConfigService<Env, true>,
+    @InjectQueue(WORKFLOW_QUEUE) private readonly queue: Queue,
   ) {
     super();
   }
 
-  onApplicationBootstrap(): void {
+  async onApplicationBootstrap(): Promise<void> {
+    await this.queue.upsertJobScheduler(
+      BINARY_CLEANUP_SCHEDULER,
+      { every: 60 * 60 * 1000 },
+      { name: JOB_BINARY_CLEANUP },
+    );
     this.worker.concurrency = this.config.get('WORKER_CONCURRENCY', {
       infer: true,
     });
@@ -41,6 +56,11 @@ export class WorkflowProcessor
         return this.executor.execute((job.data as RunJobData).executionId);
       case JOB_SCHEDULED_TRIGGER:
         return this.executor.runScheduled(job.data as ScheduledTriggerJobData);
+      case JOB_BINARY_CLEANUP: {
+        const removed = await this.binaryData.deleteOrphans();
+        if (removed > 0) this.logger.log(`Deleted ${removed} orphaned files`);
+        return;
+      }
       default:
         throw new Error(`Unknown job "${job.name}"`);
     }

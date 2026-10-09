@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { QueueModule } from '../../queue/queue.js';
+import { BinaryDataModule } from '../binary-data/binary-data.module.js';
 import { CredentialsModule } from '../credentials/credentials.module.js';
 import { ExecutionsModule } from '../executions/executions.module.js';
 import { WorkflowVersion } from '../workflows/workflow-version.entity.js';
@@ -15,6 +16,7 @@ import { WorkflowProcessor } from './workflow.processor.js';
     QueueModule,
     ExecutionsModule,
     CredentialsModule,
+    BinaryDataModule,
   ],
   providers: [ExecutionExecutor, WorkflowProcessor],
 })

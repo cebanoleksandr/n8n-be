@@ -1,5 +1,6 @@
 import { InjectQueue } from '@nestjs/bullmq';
 import {
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
@@ -9,7 +10,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import type { Queue } from 'bullmq';
 import { Repository } from 'typeorm';
 import type { Page } from '../../common/pagination.js';
-import type { JsonObject } from '../../engine/types.js';
+import type { BinaryRef, JsonObject } from '../../engine/types.js';
 import { JOB_RUN, type RunJobData, WORKFLOW_QUEUE } from '../../queue/queue.js';
 import { ExecutionEventsService } from '../events/execution-events.service.js';
 import { DEFAULT_WORKSPACE_ID } from '../workspaces/default-workspace.js';
@@ -27,11 +28,15 @@ import type {
   ListExecutionsQuery,
 } from './executions.dto.js';
 
+const CANCEL_WAIT_MS = 10_000;
+
 export interface StartExecutionOptions {
   mode: ExecutionMode;
   startNodeId?: string;
   /** JSON objects for the trigger node; each becomes one item. */
   input?: JsonObject[];
+  /** Files for the trigger items, by index (e.g. webhook uploads). */
+  binary?: Record<string, BinaryRef>[];
   /** false: the caller runs it itself (scheduled triggers already are on a worker). */
   enqueue?: boolean;
 }
@@ -65,7 +70,11 @@ export class ExecutionsService {
         status: 'queued',
         mode: options.mode,
         startNodeId: options.startNodeId ?? null,
-        input: options.input?.map((json) => ({ json })) ?? null,
+        input:
+          options.input?.map((json, i) => {
+            const binary = options.binary?.[i];
+            return binary ? { json, binary } : { json };
+          }) ?? null,
         error: null,
         startedAt: null,
         finishedAt: null,
@@ -130,6 +139,47 @@ export class ExecutionsService {
     return this.get(id);
   }
 
+  /**
+   * Queued runs are canceled directly; running ones get a cancel request over
+   * Redis that the worker holding them acts on. Waits briefly for the result.
+   */
+  async cancel(id: string): Promise<ExecutionDto> {
+    const execution = await this.executions.findOneBy({
+      id,
+      workspaceId: this.workspaceId,
+    });
+    if (!execution) throw new NotFoundException(`Execution ${id} not found`);
+    if (isFinished(execution.status)) {
+      throw new ConflictException(
+        `Execution already finished (${execution.status})`,
+      );
+    }
+
+    const finishedAt = new Date();
+    const error = {
+      name: 'ExecutionCanceledError',
+      message: 'Execution was canceled',
+    };
+    const dequeued = await this.executions.update(
+      { id, status: 'queued' },
+      { status: 'canceled', error, finishedAt },
+    );
+    if (dequeued.affected) {
+      await this.queue.remove(id).catch(() => undefined);
+      await this.events.publish({
+        type: 'execution.finished',
+        executionId: id,
+        workflowId: execution.workflowId,
+        status: 'canceled',
+        error,
+        finishedAt: finishedAt.toISOString(),
+      });
+      return this.get(id);
+    }
+    await this.events.requestCancel(id);
+    return this.waitForFinish(id, CANCEL_WAIT_MS);
+  }
+
   async list(query: ListExecutionsQuery): Promise<Page<ExecutionSummaryDto>> {
     const [items, total] = await this.executions.findAndCount({
       where: {
@@ -179,6 +229,7 @@ function toStepDto(s: ExecutionStep): ExecutionStepDto {
     status: s.status,
     output: s.output,
     error: s.error,
+    tries: s.tries,
     startedAt: s.startedAt,
     finishedAt: s.finishedAt,
   };

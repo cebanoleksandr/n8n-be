@@ -1,4 +1,5 @@
 import type { NodeType } from '../engine/types.js';
+import { errorTriggerNode } from './core/error-trigger.node.js';
 import { httpRequestNode } from './core/http-request.node.js';
 import { ifNode } from './core/if.node.js';
 import { manualTriggerNode } from './core/manual-trigger.node.js';
@@ -10,6 +11,7 @@ export const builtinNodes: NodeType[] = [
   manualTriggerNode,
   webhookNode,
   scheduleNode,
+  errorTriggerNode,
   setNode,
   ifNode,
   httpRequestNode,

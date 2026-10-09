@@ -3,6 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { isDeepStrictEqual } from 'node:util';
 import { DataSource, type EntityManager, Repository } from 'typeorm';
@@ -10,10 +11,11 @@ import { EMPTY_GRAPH, validateGraph } from '../../engine/graph.js';
 import { NodeRegistry } from '../../engine/node-registry.js';
 import type { WorkflowGraph } from '../../engine/types.js';
 import type { Page, Pagination } from '../../common/pagination.js';
+import type { Env } from '../../config/env.js';
 import { TriggersService } from '../triggers/triggers.service.js';
 import { DEFAULT_WORKSPACE_ID } from '../workspaces/default-workspace.js';
 import { WorkflowVersion } from './workflow-version.entity.js';
-import { Workflow } from './workflow.entity.js';
+import { Workflow, type WorkflowSettings } from './workflow.entity.js';
 import type {
   CreateWorkflowDto,
   UpdateWorkflowDto,
@@ -35,6 +37,7 @@ export class WorkflowsService {
     private readonly versions: Repository<WorkflowVersion>,
     private readonly registry: NodeRegistry,
     private readonly triggers: TriggersService,
+    private readonly config: ConfigService<Env, true>,
   ) {}
 
   async list({ limit, offset }: Pagination): Promise<Page<WorkflowSummaryDto>> {
@@ -62,6 +65,7 @@ export class WorkflowsService {
           workspaceId: this.workspaceId,
           name: dto.name,
           active: false,
+          settings: {},
         }),
       );
       const version = await this.addVersion(em, workflow, 1, graph);
@@ -91,6 +95,13 @@ export class WorkflowsService {
         );
       }
       if (dto.name !== undefined) workflow.name = dto.name;
+      if (dto.settings) {
+        workflow.settings = await this.mergeSettings(
+          em,
+          workflow,
+          dto.settings,
+        );
+      }
       const activeChanged =
         dto.active !== undefined && dto.active !== workflow.active;
       if (dto.active !== undefined) workflow.active = dto.active;
@@ -165,6 +176,55 @@ export class WorkflowsService {
     return version;
   }
 
+  private async mergeSettings(
+    em: EntityManager,
+    workflow: Workflow,
+    patch: NonNullable<UpdateWorkflowDto['settings']>,
+  ): Promise<WorkflowSettings> {
+    const settings: WorkflowSettings = { ...workflow.settings };
+    for (const key of ['errorWorkflowId', 'timeoutSeconds'] as const) {
+      const value = patch[key];
+      if (value === null) delete settings[key];
+      else if (value !== undefined)
+        (settings as Record<string, unknown>)[key] = value;
+    }
+
+    const max = this.config.get('EXECUTION_TIMEOUT_MAX_SECONDS', {
+      infer: true,
+    });
+    if (
+      settings.timeoutSeconds !== undefined &&
+      settings.timeoutSeconds > max
+    ) {
+      throw new BadRequestException(`timeoutSeconds cannot exceed ${max}`);
+    }
+    if (patch.errorWorkflowId) {
+      if (patch.errorWorkflowId === workflow.id) {
+        throw new BadRequestException(
+          'A workflow cannot be its own error workflow',
+        );
+      }
+      const target = await em.findOneBy(Workflow, {
+        id: patch.errorWorkflowId,
+        workspaceId: this.workspaceId,
+      });
+      if (!target) {
+        throw new BadRequestException(
+          `Workflow ${patch.errorWorkflowId} not found`,
+        );
+      }
+      const graph = (await this.currentVersion(target, em)).graph;
+      if (
+        !graph.nodes.some((n) => n.type === 'core.errorTrigger' && !n.disabled)
+      ) {
+        throw new BadRequestException(
+          `Workflow "${target.name}" has no Error Trigger node`,
+        );
+      }
+    }
+    return settings;
+  }
+
   private assertValid(graph: WorkflowGraph): void {
     const issues = validateGraph(graph, this.registry);
     if (issues.length > 0) {
@@ -189,6 +249,7 @@ function toSummary(w: Workflow): WorkflowSummaryDto {
 function toDto(w: Workflow, v: WorkflowVersion): WorkflowDto {
   return {
     ...toSummary(w),
+    settings: w.settings,
     versionId: v.id,
     version: v.version,
     graph: v.graph,

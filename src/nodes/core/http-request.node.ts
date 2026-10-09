@@ -84,11 +84,27 @@ export const httpRequestNode: NodeType = {
         ],
       },
       {
+        name: 'sendBinary',
+        displayName: 'Send File',
+        type: 'boolean',
+        default: false,
+        description:
+          "Send a file from the item's binary data as the request body",
+        displayOptions: { show: { method: BODY_METHODS } },
+      },
+      {
+        name: 'inputBinaryField',
+        displayName: 'Input Binary Field',
+        type: 'string',
+        default: 'data',
+        displayOptions: { show: { sendBinary: [true] } },
+      },
+      {
         name: 'body',
         displayName: 'JSON Body',
         type: 'json',
         default: '',
-        displayOptions: { show: { method: BODY_METHODS } },
+        displayOptions: { show: { method: BODY_METHODS, sendBinary: [false] } },
       },
       {
         name: 'responseFormat',
@@ -98,7 +114,15 @@ export const httpRequestNode: NodeType = {
         options: [
           { name: 'JSON', value: 'json' },
           { name: 'Text', value: 'text' },
+          { name: 'File', value: 'file' },
         ],
+      },
+      {
+        name: 'outputBinaryField',
+        displayName: 'Output Binary Field',
+        type: 'string',
+        default: 'data',
+        displayOptions: { show: { responseFormat: ['file'] } },
       },
       {
         name: 'fullResponse',
@@ -141,9 +165,27 @@ export const httpRequestNode: NodeType = {
       }
       Object.assign(headers, authHeaders);
 
-      let body: string | undefined;
+      let body: string | Buffer | undefined;
       const rawBody = ctx.getParameter<unknown>('body', i);
-      if (BODY_METHODS.includes(method) && rawBody !== '' && rawBody != null) {
+      if (
+        BODY_METHODS.includes(method) &&
+        ctx.getParameter<boolean>('sendBinary', i)
+      ) {
+        const field = ctx.getParameter<string>('inputBinaryField', i);
+        const ref = items[i].binary?.[field];
+        if (!ref) {
+          throw new NodeOperationError(
+            `Item has no binary field "${field}"`,
+            i,
+          );
+        }
+        body = await ctx.helpers.readBinary(ref);
+        headers['content-type'] ??= ref.mimeType;
+      } else if (
+        BODY_METHODS.includes(method) &&
+        rawBody !== '' &&
+        rawBody != null
+      ) {
         body = typeof rawBody === 'string' ? rawBody : JSON.stringify(rawBody);
         headers['content-type'] ??= 'application/json';
       }
@@ -157,16 +199,28 @@ export const httpRequestNode: NodeType = {
       });
       if (response.status >= 400) {
         throw new NodeOperationError(
-          `Request failed with status ${response.status}: ${response.body.slice(0, 500)}`,
+          `Request failed with status ${response.status}: ${response.body.toString('utf8', 0, 500)}`,
           i,
         );
       }
 
-      const data = parseBody(
-        response.body,
-        ctx.getParameter<string>('responseFormat', i),
-        i,
-      );
+      const format = ctx.getParameter<string>('responseFormat', i);
+      const meta: JsonObject = ctx.getParameter<boolean>('fullResponse', i)
+        ? { statusCode: response.status, headers: response.headers }
+        : {};
+      if (format === 'file') {
+        const ref = await ctx.helpers.storeBinary(response.body, {
+          mimeType: mimeTypeOf(response.headers['content-type']),
+          fileName: fileNameOf(response.headers['content-disposition'], url),
+        });
+        output.push({
+          json: meta,
+          binary: { [ctx.getParameter<string>('outputBinaryField', i)]: ref },
+        });
+        continue;
+      }
+
+      const data = parseBody(response.body.toString('utf8'), format, i);
       if (ctx.getParameter<boolean>('fullResponse', i)) {
         output.push({
           json: {
@@ -210,6 +264,20 @@ async function resolveAuthHeaders(
     default:
       throw new NodeOperationError(`Unknown authentication "${auth}"`);
   }
+}
+
+function mimeTypeOf(contentType: string | undefined): string {
+  return contentType?.split(';')[0].trim() || 'application/octet-stream';
+}
+
+function fileNameOf(
+  disposition: string | undefined,
+  url: URL,
+): string | undefined {
+  const match =
+    disposition && /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition);
+  if (match) return decodeURIComponent(match[1]);
+  return url.pathname.split('/').filter(Boolean).at(-1);
 }
 
 function parseBody(body: string, format: string, itemIndex: number): JsonValue {

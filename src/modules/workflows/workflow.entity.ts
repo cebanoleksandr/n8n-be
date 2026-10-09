@@ -11,6 +11,14 @@ import {
 } from 'typeorm';
 import { Workspace } from '../workspaces/workspace.entity.js';
 
+/** Workflow-level settings; not versioned with the graph. */
+export interface WorkflowSettings {
+  /** Workflow (with an Error Trigger) started when a non-manual run fails. */
+  errorWorkflowId?: string;
+  /** Abort runs that take longer; capped by EXECUTION_TIMEOUT_MAX_SECONDS. */
+  timeoutSeconds?: number;
+}
+
 @Entity('workflows')
 @Index(['workspaceId', 'updatedAt'])
 export class Workflow {
@@ -37,6 +45,9 @@ export class Workflow {
    */
   @Column({ name: 'current_version_id', type: 'uuid', nullable: true })
   currentVersionId: string | null;
+
+  @Column({ type: 'jsonb', default: {} })
+  settings: WorkflowSettings;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;

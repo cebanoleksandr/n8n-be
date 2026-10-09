@@ -16,6 +16,10 @@ import { Execution } from './execution.entity.js';
  */
 export interface StoredItem {
   json: Record<string, unknown>;
+  binary?: Record<
+    string,
+    { id: string; fileName?: string; mimeType: string; size: number }
+  >;
 }
 
 /** Result of one node within an execution. Output can be large: load it only when needed. */
@@ -51,6 +55,10 @@ export class ExecutionStep {
 
   @Column({ type: 'jsonb', nullable: true })
   error: SerializedError | null;
+
+  /** Attempts made; > 1 when the node has retryOnFail. */
+  @Column({ type: 'int', default: 1 })
+  tries: number;
 
   @Column({ name: 'started_at', type: 'timestamptz' })
   startedAt: Date;

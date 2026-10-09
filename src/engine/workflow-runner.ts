@@ -1,5 +1,5 @@
 import { NodeOperationError, WorkflowValidationError } from './errors.js';
-import { resolveParameter } from './expression.js';
+import { type ExpressionData, resolveParameter } from './expression.js';
 import {
   incomingConnections,
   topologicalOrder,
@@ -8,11 +8,13 @@ import {
 import { httpRequest } from './http.js';
 import type { NodeRegistry } from './node-registry.js';
 import type {
+  BinaryStore,
   CredentialsProvider,
   Item,
   JsonObject,
   NodeExecuteContext,
   NodeType,
+  WorkflowConnection,
   WorkflowGraph,
   WorkflowNode,
 } from './types.js';
@@ -32,11 +34,17 @@ export interface NodeRunResult {
   /** One item array per output. */
   output: Item[][];
   error?: SerializedError;
+  /** Attempts made, > 1 when retryOnFail kicked in. */
+  tries: number;
 }
 
 export type RunStatus = 'success' | 'error' | 'canceled';
 
 export interface RunResult {
+  /**
+   * 'canceled' means the signal aborted the run; the caller knows why
+   * (signal.reason) and decides how to report it, e.g. timeout vs. user cancel.
+   */
   status: RunStatus;
   nodes: NodeRunResult[];
   error?: SerializedError & { nodeId?: string };
@@ -53,20 +61,26 @@ export interface RunOptions {
   startNodeId?: string;
   /** Items handed to the start node. Defaults to a single empty item. */
   triggerItems?: Item[];
+  /** Aborting it stops the run: between nodes, during retries and mid-node. */
   signal?: AbortSignal;
   hooks?: RunHooks;
   credentials?: CredentialsProvider;
+  binary?: BinaryStore;
+  /** Exposed to expressions as $workflow and $execution. */
+  workflow?: { id: string; name: string };
+  execution?: { id: string; mode: string };
 }
+
+const MAX_TRIES = 10;
+const DEFAULT_TRIES = 3;
+const DEFAULT_WAIT_BETWEEN_TRIES_MS = 1000;
 
 export class WorkflowRunner {
   constructor(private readonly registry: NodeRegistry) {}
 
   async run(options: RunOptions): Promise<RunResult> {
-    const {
-      graph,
-      hooks = {},
-      signal = new AbortController().signal,
-    } = options;
+    const { graph, hooks = {} } = options;
+    const signal = options.signal ?? new AbortController().signal;
 
     const issues = validateGraph(graph, this.registry);
     if (issues.length > 0) throw new WorkflowValidationError(issues);
@@ -86,7 +100,7 @@ export class WorkflowRunner {
       const inputs =
         node.id === startNode.id
           ? [options.triggerItems ?? [{ json: {} }]]
-          : collectInputs(node, nodeType, incoming.get(node.id) ?? [], outputs);
+          : collectInputs(nodeType, incoming.get(node.id) ?? [], outputs);
 
       // Nodes on branches that received no data (e.g. the unused side of an IF) are skipped.
       if (inputs.every((items) => items.length === 0)) continue;
@@ -102,17 +116,15 @@ export class WorkflowRunner {
       }
 
       await hooks.nodeStarted?.(node);
-      const result = await this.executeNode(
-        node,
-        nodeType,
-        inputs,
+      const result = await this.executeNode(node, nodeType, inputs, {
         outputsByName,
         signal,
-        options.credentials,
-      );
+        options,
+      });
       results.push(result);
       await hooks.nodeFinished?.(result);
 
+      if (signal.aborted) return { status: 'canceled', nodes: results };
       if (result.status === 'error' && !node.continueOnFail) {
         return {
           status: 'error',
@@ -159,72 +171,120 @@ export class WorkflowRunner {
     node: WorkflowNode,
     nodeType: NodeType,
     inputs: Item[][],
-    outputsByName: Map<string, Item[][]>,
-    signal: AbortSignal,
-    credentials: CredentialsProvider | undefined,
+    run: {
+      outputsByName: Map<string, Item[][]>;
+      signal: AbortSignal;
+      options: RunOptions;
+    },
   ): Promise<NodeRunResult> {
+    const { signal } = run;
     const startedAt = new Date();
     const outputCount = nodeType.description.outputs.length;
-    const ctx: NodeExecuteContext = {
+    const ctx = this.createContext(node, nodeType, inputs, run);
+    const maxTries = node.retryOnFail
+      ? Math.min(Math.max(node.maxTries ?? DEFAULT_TRIES, 1), MAX_TRIES)
+      : 1;
+    const base = { nodeId: node.id, nodeName: node.name, startedAt };
+
+    for (let tries = 1; ; tries++) {
+      try {
+        const output = await untilAborted(nodeType.execute(ctx), signal);
+        return {
+          ...base,
+          status: 'success',
+          finishedAt: new Date(),
+          output: Array.from(
+            { length: outputCount },
+            (_, i) => output[i] ?? [],
+          ),
+          tries,
+        };
+      } catch (err) {
+        if (tries < maxTries && !signal.aborted) {
+          await sleep(
+            node.waitBetweenTriesMs ?? DEFAULT_WAIT_BETWEEN_TRIES_MS,
+            signal,
+          );
+          if (!signal.aborted) continue;
+        }
+        const error = signal.aborted ? abortError(signal) : serializeError(err);
+        const errorItem: Item = {
+          json: { error: error.message } as JsonObject,
+        };
+        return {
+          ...base,
+          status: 'error',
+          finishedAt: new Date(),
+          output: Array.from({ length: outputCount }, (_, i) =>
+            i === 0 && node.continueOnFail && !signal.aborted
+              ? [errorItem]
+              : [],
+          ),
+          error,
+          tries,
+        };
+      }
+    }
+  }
+
+  private createContext(
+    node: WorkflowNode,
+    nodeType: NodeType,
+    inputs: Item[][],
+    {
+      outputsByName,
+      signal,
+      options,
+    }: {
+      outputsByName: Map<string, Item[][]>;
+      signal: AbortSignal;
+      options: RunOptions;
+    },
+  ): NodeExecuteContext {
+    const binary = options.binary;
+    const noBinary = (): never => {
+      throw new NodeOperationError('Binary data storage is not configured');
+    };
+    return {
       node,
       signal,
       getInputItems: (inputIndex = 0) => inputs[inputIndex] ?? [],
       getParameter: <T>(name: string, itemIndex: number) => {
         const raw = node.parameters[name] ?? defaultFor(nodeType, name);
-        return resolveParameter(raw, {
-          json: inputs[0]?.[itemIndex]?.json ?? {},
+        const item = inputs[0]?.[itemIndex];
+        const data: ExpressionData = {
+          json: item?.json ?? {},
+          binary: item?.binary,
           itemIndex,
           nodeOutput: (nodeName) => outputsByName.get(nodeName)?.[0],
-        }) as T;
+          workflow: options.workflow,
+          execution: options.execution,
+        };
+        return resolveParameter(raw, data) as T;
       },
       getCredentials: async <T>(type: string) => {
         const id = node.credentials?.[type];
         if (!id) {
           throw new NodeOperationError(`No "${type}" credential selected`);
         }
-        if (!credentials) {
+        if (!options.credentials) {
           throw new NodeOperationError('Credentials are not available');
         }
-        return (await credentials.get(id, type)) as T;
+        return (await options.credentials.get(id, type)) as T;
       },
-      helpers: { httpRequest: (opts) => httpRequest(opts, signal) },
+      helpers: {
+        httpRequest: (opts) => httpRequest(opts, signal),
+        storeBinary: (data, meta) =>
+          binary ? binary.put(data, meta) : noBinary(),
+        readBinary: (ref) => (binary ? binary.get(ref) : noBinary()),
+      },
     };
-
-    try {
-      const output = await nodeType.execute(ctx);
-      return {
-        nodeId: node.id,
-        nodeName: node.name,
-        status: 'success',
-        startedAt,
-        finishedAt: new Date(),
-        output: Array.from({ length: outputCount }, (_, i) => output[i] ?? []),
-      };
-    } catch (err) {
-      const error = serializeError(err);
-      const errorItem: Item = { json: { error: error.message } as JsonObject };
-      return {
-        nodeId: node.id,
-        nodeName: node.name,
-        status: 'error',
-        startedAt,
-        finishedAt: new Date(),
-        output: Array.from({ length: outputCount }, (_, i) =>
-          i === 0 && node.continueOnFail ? [errorItem] : [],
-        ),
-        error,
-      };
-    }
   }
 }
 
 function collectInputs(
-  node: WorkflowNode,
   nodeType: NodeType,
-  connections: {
-    from: { nodeId: string; index: number };
-    to: { index: number };
-  }[],
+  connections: WorkflowConnection[],
   outputs: Map<string, Item[][]>,
 ): Item[][] {
   const inputs: Item[][] = Array.from(
@@ -256,6 +316,47 @@ function reachableFrom(graph: WorkflowGraph, startId: string): Set<string> {
 
 function defaultFor(nodeType: NodeType, name: string): unknown {
   return nodeType.description.properties.find((p) => p.name === name)?.default;
+}
+
+/**
+ * Resolves with the node's result, or rejects as soon as the signal aborts so a
+ * node that ignores the signal cannot hold the run past a timeout or cancel.
+ */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason as Error);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason as Error);
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (err: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(err as Error);
+      },
+    );
+  });
+}
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+    function done() {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    }
+  });
+}
+
+function abortError(signal: AbortSignal): SerializedError {
+  const reason = signal.reason as unknown;
+  return reason instanceof Error
+    ? { name: reason.name, message: reason.message }
+    : { name: 'AbortError', message: 'Execution was aborted' };
 }
 
 function serializeError(err: unknown): SerializedError {

@@ -4,7 +4,7 @@ import { builtinNodes } from '../nodes/index.js';
 import { WorkflowValidationError } from './errors.js';
 import { NodeRegistry } from './node-registry.js';
 import { connect, node } from './test-utils.js';
-import type { NodeType } from './types.js';
+import type { BinaryRef, BinaryStore, NodeType } from './types.js';
 import { WorkflowRunner } from './workflow-runner.js';
 
 const failingNode: NodeType = {
@@ -39,9 +39,50 @@ const mergeNode: NodeType = {
   },
 };
 
+/** Fails until it has been called `failTimes` times (per run, via the parameter). */
+let flakyCalls = 0;
+const flakyNode: NodeType = {
+  description: { ...failingNode.description, type: 'test.flaky' },
+  async execute(ctx) {
+    flakyCalls++;
+    if (flakyCalls <= ctx.getParameter<number>('failTimes', 0)) {
+      throw new Error(`flaky failure ${flakyCalls}`);
+    }
+    return [ctx.getInputItems()];
+  },
+};
+
+/** Never resolves and ignores the abort signal. */
+const hangingNode: NodeType = {
+  description: { ...failingNode.description, type: 'test.hang' },
+  execute: () => new Promise(() => {}),
+};
+
 const runner = new WorkflowRunner(
-  new NodeRegistry([...builtinNodes, failingNode, mergeNode]),
+  new NodeRegistry([
+    ...builtinNodes,
+    failingNode,
+    mergeNode,
+    flakyNode,
+    hangingNode,
+  ]),
 );
+
+class MemoryBinaryStore implements BinaryStore {
+  readonly files = new Map<string, Buffer>();
+  async put(data: Buffer, meta: { fileName?: string; mimeType: string }) {
+    const ref: BinaryRef = {
+      id: `bin-${this.files.size + 1}`,
+      size: data.length,
+      ...meta,
+    };
+    this.files.set(ref.id, data);
+    return ref;
+  }
+  async get(ref: BinaryRef) {
+    return this.files.get(ref.id)!;
+  }
+}
 
 const ageCheck = node('if', 'core.if', {
   conditions: [
@@ -241,6 +282,113 @@ describe('WorkflowRunner', () => {
     expect(result.status).toBe('canceled');
   });
 
+  describe('retries', () => {
+    beforeEach(() => {
+      flakyCalls = 0;
+    });
+
+    const flakyGraph = (failTimes: number, extra = {}) => ({
+      nodes: [
+        node('trigger', 'core.manualTrigger'),
+        node(
+          'flaky',
+          'test.flaky',
+          { failTimes },
+          {
+            retryOnFail: true,
+            maxTries: 3,
+            waitBetweenTriesMs: 1,
+            ...extra,
+          },
+        ),
+      ],
+      connections: [connect('trigger', 'flaky')],
+    });
+
+    it('retries a failing node until it succeeds', async () => {
+      const result = await runner.run({ graph: flakyGraph(2) });
+      expect(result.status).toBe('success');
+      expect(result.nodes[1]).toMatchObject({ status: 'success', tries: 3 });
+    });
+
+    it('fails with the last error once maxTries is reached', async () => {
+      const result = await runner.run({ graph: flakyGraph(5) });
+      expect(result.status).toBe('error');
+      expect(result.nodes[1]).toMatchObject({ status: 'error', tries: 3 });
+      expect(result.error?.message).toBe('flaky failure 3');
+    });
+
+    it('does not retry without retryOnFail', async () => {
+      const result = await runner.run({
+        graph: flakyGraph(1, { retryOnFail: false }),
+      });
+      expect(result.nodes[1].tries).toBe(1);
+      expect(flakyCalls).toBe(1);
+    });
+
+    it('stops waiting between tries when aborted', async () => {
+      const controller = new AbortController();
+      const started = Date.now();
+      setTimeout(() => controller.abort(new Error('stop')), 20);
+      const result = await runner.run({
+        graph: flakyGraph(5, { waitBetweenTriesMs: 60_000 }),
+        signal: controller.signal,
+      });
+      expect(result.status).toBe('canceled');
+      expect(Date.now() - started).toBeLessThan(1000);
+    });
+  });
+
+  describe('abort', () => {
+    it('interrupts a node that ignores the signal', async () => {
+      const finished: string[] = [];
+      const result = await runner.run({
+        graph: {
+          nodes: [
+            node('trigger', 'core.manualTrigger'),
+            node('hang', 'test.hang'),
+            node('after', 'core.set'),
+          ],
+          connections: [connect('trigger', 'hang'), connect('hang', 'after')],
+        },
+        signal: AbortSignal.timeout(30),
+        hooks: {
+          nodeFinished: (r) => void finished.push(`${r.nodeId}:${r.status}`),
+        },
+      });
+      expect(result.status).toBe('canceled');
+      expect(finished).toEqual(['trigger:success', 'hang:error']);
+      expect(result.nodes[1].error?.name).toBe('TimeoutError');
+    });
+  });
+
+  describe('expression context', () => {
+    it('exposes $workflow, $execution and earlier nodes', async () => {
+      const result = await runner.run({
+        graph: {
+          nodes: [
+            node('trigger', 'core.manualTrigger'),
+            node('set', 'core.set', {
+              assignments: [
+                {
+                  name: 'label',
+                  type: 'string',
+                  value:
+                    '{{ $workflow.name }}/{{ $execution.mode }}/{{ $node["trigger"].json.n * 2 }}',
+                },
+              ],
+            }),
+          ],
+          connections: [connect('trigger', 'set')],
+        },
+        triggerItems: [{ json: { n: 21 } }],
+        workflow: { id: 'w', name: 'Orders' },
+        execution: { id: 'e', mode: 'webhook' },
+      });
+      expect(result.nodes[1].output[0][0].json.label).toBe('Orders/webhook/42');
+    });
+  });
+
   describe('HTTP Request node', () => {
     let server: Server;
     let baseUrl: string;
@@ -252,6 +400,21 @@ describe('WorkflowRunner', () => {
         req.on('end', () => {
           if (req.url?.startsWith('/fail')) {
             res.writeHead(500).end('nope');
+            return;
+          }
+          if (req.url?.startsWith('/file')) {
+            res.writeHead(200, {
+              'content-type': 'image/png; charset=binary',
+              'content-disposition': 'attachment; filename="logo.png"',
+            });
+            res.end(Buffer.from([1, 2, 3]));
+            return;
+          }
+          if (req.url?.startsWith('/echo-raw')) {
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end(
+              JSON.stringify({ type: req.headers['content-type'], body }),
+            );
             return;
           }
           res.writeHead(200, { 'content-type': 'application/json' });
@@ -371,6 +534,63 @@ describe('WorkflowRunner', () => {
       });
       expect(result.error?.message).toBe(
         'No "httpBearerAuth" credential selected',
+      );
+    });
+
+    it('downloads a response as a file and sends it back as a body', async () => {
+      const store = new MemoryBinaryStore();
+      const result = await runner.run({
+        graph: {
+          nodes: [
+            node('trigger', 'core.manualTrigger'),
+            node('download', 'core.httpRequest', {
+              url: `${baseUrl}/file`,
+              responseFormat: 'file',
+            }),
+            node('upload', 'core.httpRequest', {
+              method: 'POST',
+              url: `${baseUrl}/echo-raw`,
+              sendBinary: true,
+            }),
+          ],
+          connections: [
+            connect('trigger', 'download'),
+            connect('download', 'upload'),
+          ],
+        },
+        binary: store,
+      });
+
+      expect(result.status).toBe('success');
+      const downloaded = result.nodes[1].output[0][0];
+      expect(downloaded.binary?.data).toEqual({
+        id: 'bin-1',
+        fileName: 'logo.png',
+        mimeType: 'image/png',
+        size: 3,
+      });
+      expect(store.files.get('bin-1')).toEqual(Buffer.from([1, 2, 3]));
+      expect(result.nodes[2].output[0][0].json).toEqual({
+        type: 'image/png',
+        body: Buffer.from([1, 2, 3]).toString(),
+      });
+    });
+
+    it('fails clearly without binary storage', async () => {
+      const result = await runner.run({
+        graph: {
+          nodes: [
+            node('trigger', 'core.manualTrigger'),
+            node('download', 'core.httpRequest', {
+              url: `${baseUrl}/file`,
+              responseFormat: 'file',
+            }),
+          ],
+          connections: [connect('trigger', 'download')],
+        },
+      });
+      expect(result.error?.message).toBe(
+        'Binary data storage is not configured',
       );
     });
   });

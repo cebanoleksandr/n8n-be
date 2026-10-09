@@ -109,9 +109,9 @@ export class TriggersService implements OnApplicationBootstrap {
   }
 
   findWebhook(method: string, path: string): Promise<Webhook | null> {
-    return this.webhooks.findOneBy({
-      method: method.toUpperCase() as WebhookMethod,
-      path,
+    return this.webhooks.findOne({
+      relations: { workflow: true },
+      where: { method: method.toUpperCase() as WebhookMethod, path },
     });
   }
 

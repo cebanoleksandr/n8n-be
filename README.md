@@ -1,13 +1,13 @@
 # Flow Platform — backend
 
-Workflow automation backend (n8n-style): NestJS 12, TypeORM + PostgreSQL, BullMQ + Redis, socket.io.
+Workflow automation backend (n8n-style): NestJS 12, TypeORM + PostgreSQL, BullMQ + Redis, S3-compatible object storage, socket.io.
 
 ## Getting started
 
 ```bash
 cp .env.example .env
 # set ENCRYPTION_KEY in .env: openssl rand -base64 32
-docker compose up -d              # Postgres on :5440, Redis on :6390
+docker compose up -d              # Postgres :5440, Redis :6390, S3 (SeaweedFS) :9010
 npm install
 npm run start:dev                 # APP_ROLE=all: API + worker in one process; migrations run on startup
 ```
@@ -44,6 +44,10 @@ BullMQ job scheduler (cron) ─┘                                              
   - **Webhook nodes** get rows in the `webhooks` table, written in the same transaction as the workflow save. Path conflicts return 409 and roll back the save.
   - **Schedule nodes** become BullMQ job schedulers in Redis (`schedule:<workflowId>:<nodeId>`). On startup the schedulers are reconciled against active workflows, and a worker that fires a stale scheduler removes it.
   - **Saving** an active workflow re-syncs its triggers. **Deactivating** or **deleting** it removes them.
+- **Retries** are per node: `retryOnFail`, `maxTries` (≤ 10) and `waitBetweenTriesMs` on the graph node. `execution_steps.tries` records the attempts.
+- **Timeouts and cancel** share one AbortSignal per run. The timeout is `settings.timeoutSeconds`, capped by `EXECUTION_TIMEOUT_MAX_SECONDS`, and a timed-out run ends as `error` (`ExecutionTimeoutError`). `POST /api/executions/:id/cancel` cancels a queued run directly. For a running one the API publishes a cancel request over Redis, and the worker holding the run aborts it. The runner stops between nodes, during retry waits and mid-node: it stops waiting for the node's promise even if the node ignores the signal.
+- **Error workflows**: `settings.errorWorkflowId` points to a workflow with an **Error Trigger**. When a webhook or schedule run fails, that workflow is started with `{ execution: { id, mode, error, lastNodeExecuted, startedAt }, workflow: { id, name } }`. As in n8n, manual runs and failures of error workflows do not trigger it.
+- **Binary data**: items carry `binary: { [field]: { id, fileName, mimeType, size } }`, and the bytes live in S3 under `<workspaceId>/<id>`, with metadata in `binary_data`. Nodes use `ctx.helpers.storeBinary/readBinary`. Webhooks store multipart files and raw non-JSON bodies (field `data`). Deleting a workflow orphans its files, and an hourly job deletes them. Any S3 service works; compose uses SeaweedFS because MinIO no longer publishes public images.
 - **Credentials** are encrypted with AES-256-GCM using `ENCRYPTION_KEY`. The API never returns fields marked `secret`. `PUT` merges data, so omitted fields keep their stored values. If the key is lost, stored credentials become unreadable.
 
 ## Scripts
@@ -73,6 +77,8 @@ src/
     triggers/    Activation: webhook routing table and cron job schedulers
     webhooks/    Public /webhook/* endpoint (api role only)
     credentials/ Encrypted credential storage
+    binary-data/ S3 storage of item files, download endpoint, orphan cleanup
+    expressions/ Autocomplete reference and live evaluation for the editor
     events/      Redis pub/sub of execution progress + socket.io gateway
     node-types/  NodeRegistry + GET /api/node-types (the editor builds forms from it)
     workspaces/  Tenant boundary; a single default workspace until auth exists
@@ -85,16 +91,36 @@ src/
 |---|---|---|
 | GET | `/api/node-types` | Node type descriptions |
 | GET, POST | `/api/workflows` | List (paginated) / create |
-| GET, PUT, DELETE | `/api/workflows/:id` | Read / update (`graph` → new version, `active` → (de)activate triggers) / delete |
+| GET, PUT, DELETE | `/api/workflows/:id` | Read / update (`graph` → new version, `active` → (de)activate triggers, `settings` → `{ errorWorkflowId, timeoutSeconds }`, `null` clears) / delete |
 | GET | `/api/workflows/:id/versions` | Version history |
 | POST | `/api/workflows/:id/run` | Queue a run (202). `?wait=true` responds when finished (200, up to 60s). Body `{ input?: object[], startNodeId? }` |
 | GET | `/api/executions?workflowId=&status=` | Execution history |
 | GET | `/api/executions/:id` | Execution with per-node output |
+| POST | `/api/executions/:id/cancel` | Cancel a queued/running execution (409 if finished) |
+| GET | `/api/binary-data/:id` | Download a stored file (`?download=true` for attachment) |
+| GET | `/api/expressions/reference` | Variables, functions, methods (editor autocomplete) |
+| POST | `/api/expressions/evaluate` | Evaluate `{ expression, json?, nodes?, itemIndex? }` → `{ value }` |
 | GET | `/api/credential-types` | Credential type descriptions |
 | GET, POST | `/api/credentials` | List (`?type=`) / create |
 | GET, PUT, DELETE | `/api/credentials/:id` | Read (no secrets) / update (merge) / delete |
 | ANY | `/webhook/<path>` | Webhook triggers of active workflows |
 | GET | `/api/health` | DB health check |
+
+### Expressions
+
+Parameters may contain `{{ }}`. The language is a small JS-like subset that is interpreted, not `eval`'d: it has no access to globals, prototypes or arbitrary functions, and work and result size are capped.
+
+```
+{{ $json.price * 1.2 }}                         + - * / %  < <= > >=  == != (loose)  === !== (deep)
+{{ $json.age >= 18 ? "adult" : "minor" }}       && || ?? !  a ? b : c
+{{ $json.name.trim().toUpperCase() }}           string / number / array methods (whitelist)
+{{ $json.items.filter(i => i.qty > 0).map(i => i.sku).join(", ") }}
+{{ round(sum($json.items.map(i => i.price)), 2) }}
+{{ formatDate(dateAdd($now, 1, "days"), "yyyy-MM-dd") }}
+{{ $node["HTTP Request"].json.id }}   {{ $binary.data.fileName }}   {{ $workflow.name }}
+```
+
+`GET /api/expressions/reference` lists everything available. A parameter that is exactly one expression keeps its type (number, array, ...), otherwise the result is interpolated as text.
 
 ### Webhook responses
 
@@ -103,7 +129,7 @@ src/
 | `onReceived` (default) | `202 { executionId }` |
 | `lastNode` | `200` + first item of the last executed node. `500` if the run failed. `202` if it did not finish within 30s |
 
-The trigger item is `{ method, path, headers, query, body }`.
+The trigger item is `{ method, path, headers, query, body }`. Uploaded files are in its `binary`: multipart parts by field name, or a raw body as `data`. The size limit is `BINARY_MAX_BYTES`, and larger uploads get 413.
 
 ### Realtime events
 

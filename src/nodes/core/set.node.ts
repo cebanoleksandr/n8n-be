@@ -67,7 +67,8 @@ export const setNode: NodeType = {
         if (!a.name) throw new NodeOperationError('Field name is required', i);
         setPath(json, a.name, cast(a.value, a.type, i));
       }
-      return { json };
+      // Files pass through unchanged; Set only edits JSON.
+      return item.binary ? { json, binary: item.binary } : { json };
     });
     return [output];
   },
