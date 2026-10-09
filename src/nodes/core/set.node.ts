@@ -1,5 +1,6 @@
 import { NodeOperationError } from '../../engine/errors.js';
 import { toText } from '../../engine/expression.js';
+import { setPath } from '../utils.js';
 import type { JsonObject, JsonValue, NodeType } from '../../engine/types.js';
 
 interface Assignment {
@@ -101,17 +102,4 @@ function cast(
     default:
       return toText(value);
   }
-}
-
-function setPath(target: JsonObject, path: string, value: JsonValue): void {
-  const keys = path.split('.');
-  let current = target;
-  for (const key of keys.slice(0, -1)) {
-    const next = current[key];
-    if (next === null || typeof next !== 'object' || Array.isArray(next)) {
-      current[key] = {};
-    }
-    current = current[key] as JsonObject;
-  }
-  current[keys[keys.length - 1]] = value;
 }

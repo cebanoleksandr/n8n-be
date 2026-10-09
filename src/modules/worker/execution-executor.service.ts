@@ -8,12 +8,16 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import type { Queue } from 'bullmq';
-import { In, Repository } from 'typeorm';
+import { In, LessThan, Repository } from 'typeorm';
 import type { Env } from '../../config/env.js';
-import { WorkflowValidationError } from '../../engine/errors.js';
+import {
+  NodeOperationError,
+  WorkflowValidationError,
+} from '../../engine/errors.js';
 import type { Item, JsonObject } from '../../engine/types.js';
 import {
   type RunResult,
+  type RunState,
   type SerializedError,
   WorkflowRunner,
 } from '../../engine/workflow-runner.js';
@@ -21,6 +25,9 @@ import {
   schedulerId,
   type ScheduledTriggerJobData,
   WORKFLOW_QUEUE,
+  JOB_RESUME,
+  resumeJobId,
+  type RunJobData,
 } from '../../queue/queue.js';
 import { BinaryDataService } from '../binary-data/binary-data.service.js';
 import { CredentialsService } from '../credentials/credentials.service.js';
@@ -83,18 +90,27 @@ export class ExecutionExecutor
     }
   }
 
-  async execute(executionId: string): Promise<void> {
-    // Claim atomically: a duplicate job (or a canceled queued run) must not run.
+  /**
+   * Runs a queued execution. `parentSignal` links a waited-for sub-workflow to
+   * its caller, so canceling or timing out the caller stops it too.
+   */
+  async execute(
+    executionId: string,
+    parentSignal?: AbortSignal,
+    { resume = false }: { resume?: boolean } = {},
+  ): Promise<ExecutionOutcome | null> {
+    // Claim atomically: a duplicate job (or a canceled run) must not run.
+    // A resumed run keeps its original start time.
     const startedAt = new Date();
     const claim = await this.executions.update(
-      { id: executionId, status: 'queued' },
-      { status: 'running', startedAt },
+      { id: executionId, status: resume ? 'waiting' : 'queued' },
+      resume ? { status: 'running' } : { status: 'running', startedAt },
     );
     if (!claim.affected) {
       this.logger.warn(
         `Execution ${executionId} is missing, canceled or already claimed`,
       );
-      return;
+      return null;
     }
     const execution = await this.executions.findOneByOrFail({
       id: executionId,
@@ -103,11 +119,14 @@ export class ExecutionExecutor
     await this.events.publish({
       ...base,
       type: 'execution.started',
-      startedAt: startedAt.toISOString(),
+      startedAt: (execution.startedAt ?? startedAt).toISOString(),
     });
 
     const controller = new AbortController();
     this.running.set(executionId, controller);
+    const forwardAbort = () => controller.abort(parentSignal?.reason);
+    if (parentSignal?.aborted) forwardAbort();
+    parentSignal?.addEventListener('abort', forwardAbort, { once: true });
     let timer: NodeJS.Timeout | undefined;
     let result: RunResult;
     let workflow: Workflow | null = null;
@@ -128,14 +147,20 @@ export class ExecutionExecutor
       const version = await this.versions.findOneByOrFail({
         id: execution.workflowVersionId,
       });
-      let stepIndex = 0;
+      let responded = false;
+      // A resumed run appends to the steps recorded before the pause.
+      let stepIndex = resume ? await this.steps.countBy({ executionId }) : 0;
       const runOptions = execution.runOptions ?? {};
       result = await this.runner.run({
         graph: version.graph,
         startNodeId: execution.startNodeId ?? undefined,
         destinationNodeId: runOptions.destinationNodeId,
+        resume:
+          resume && execution.waitState
+            ? (execution.waitState as unknown as RunState)
+            : undefined,
         runFrom:
-          runOptions.runFromNodeId && runOptions.sourceExecutionId
+          !resume && runOptions.runFromNodeId && runOptions.sourceExecutionId
             ? {
                 nodeId: runOptions.runFromNodeId,
                 previousOutputs: await this.previousOutputs(
@@ -156,6 +181,29 @@ export class ExecutionExecutor
         }),
         workflow: { id: workflow.id, name: workflow.name },
         execution: { id: executionId, mode: execution.mode },
+        onWebhookResponse: async (response) => {
+          // Only the first Respond to Webhook answers the request.
+          if (responded) return;
+          responded = true;
+          await this.events.publish({
+            ...base,
+            type: 'execution.response',
+            statusCode: response.statusCode,
+            headers: response.headers,
+            body: response.body,
+            binary: response.binary,
+          });
+        },
+        subWorkflows: {
+          run: (targetId, items, wait) =>
+            this.runSubWorkflow(
+              execution,
+              targetId,
+              items,
+              wait,
+              controller.signal,
+            ),
+        },
         hooks: {
           nodeStarted: (node) =>
             this.events.publish({
@@ -199,13 +247,89 @@ export class ExecutionExecutor
     } finally {
       clearTimeout(timer);
       this.running.delete(executionId);
+      parentSignal?.removeEventListener('abort', forwardAbort);
     }
 
+    if (result.status === 'waiting' && result.waitTill && result.state) {
+      try {
+        await this.suspend(execution, result.waitTill, result.state);
+        return { status: 'waiting', error: null, lastOutput: [] };
+      } catch (err) {
+        // Never leave a run "waiting" without a job that will resume it.
+        this.logger.error(`Could not pause execution ${executionId}`, err);
+        result = { status: 'error', nodes: result.nodes, error: toError(err) };
+      }
+    }
     const { status, error } = this.outcome(result, controller.signal);
     await this.finish(execution, status, error);
     if (status === 'error' && workflow) {
       await this.startErrorWorkflow(execution, workflow, result, error!);
     }
+    return { status, error, lastOutput: result.nodes.at(-1)?.output[0] ?? [] };
+  }
+
+  /**
+   * Execute Workflow node: creates a child execution of the target's current
+   * version. When waiting, it runs right here (inside the caller's job slot,
+   * so nested calls cannot starve the worker pool) and returns its last output.
+   */
+  private async runSubWorkflow(
+    parent: Execution,
+    targetId: string,
+    items: Item[],
+    wait: boolean,
+    signal: AbortSignal,
+  ): Promise<Item[]> {
+    if (parent.depth >= MAX_SUBWORKFLOW_DEPTH) {
+      throw new NodeOperationError(
+        `Sub-workflows can be nested at most ${MAX_SUBWORKFLOW_DEPTH} levels deep`,
+      );
+    }
+    const target = await this.workflows.findOneBy({
+      id: targetId,
+      workspaceId: parent.workspaceId,
+    });
+    if (!target) throw new NodeOperationError(`Workflow ${targetId} not found`);
+    const graph = target.currentVersionId
+      ? (await this.versions.findOneBy({ id: target.currentVersionId }))?.graph
+      : undefined;
+    const trigger = graph?.nodes.find(
+      (n) => n.type === 'core.executeWorkflowTrigger' && !n.disabled,
+    );
+    if (!trigger) {
+      throw new NodeOperationError(
+        `Workflow "${target.name}" has no Execute Workflow Trigger`,
+      );
+    }
+
+    const child = await this.executionsService.start(
+      parent.workspaceId,
+      targetId,
+      {
+        mode: 'subworkflow',
+        startNodeId: trigger.id,
+        input: items.map((i) => i.json),
+        binary: items.map((i) => i.binary),
+        enqueue: !wait,
+        parentExecutionId: parent.id,
+        depth: parent.depth + 1,
+      },
+    );
+    if (!wait) return items;
+
+    const outcome = await this.execute(child.id, signal);
+    if (outcome?.status === 'waiting') {
+      throw new NodeOperationError(
+        `Sub-workflow "${target.name}" paused at a Wait node; turn off "Wait for Completion" to run it in the background`,
+      );
+    }
+    if (outcome?.status !== 'success') {
+      const reason = outcome?.error?.message ?? 'did not run';
+      throw new NodeOperationError(
+        `Sub-workflow "${target.name}" failed: ${reason}`,
+      );
+    }
+    return outcome.lastOutput;
   }
 
   /** Runs a Schedule trigger tick directly on this worker. */
@@ -318,13 +442,67 @@ export class ExecutionExecutor
     };
   }
 
+  /** Persists a paused run and schedules its continuation. */
+  private async suspend(execution: Execution, waitTill: Date, state: RunState) {
+    // Query builder: TypeORM's update() types cannot express the item JSON.
+    await this.executions
+      .createQueryBuilder()
+      .update()
+      .set({
+        status: 'waiting',
+        waitTill,
+        waitState: () => 'CAST(:state AS jsonb)',
+      })
+      .setParameter('state', JSON.stringify(state))
+      .where('id = :id', { id: execution.id })
+      .execute();
+    await this.events.publish({
+      type: 'execution.waiting',
+      executionId: execution.id,
+      workflowId: execution.workflowId,
+      waitTill: waitTill.toISOString(),
+    });
+    await this.scheduleResume(execution.id, waitTill);
+  }
+
+  private async scheduleResume(executionId: string, waitTill: Date) {
+    const data: RunJobData = { executionId };
+    await this.queue.add(JOB_RESUME, data, {
+      jobId: resumeJobId(executionId),
+      delay: Math.max(0, waitTill.getTime() - Date.now()),
+    });
+  }
+
+  /**
+   * Waiting runs whose resume job is gone (e.g. Redis was flushed) and that
+   * are overdue get a new one. Job ids are deterministic, so this is idempotent.
+   */
+  async recoverOverdueWaits(): Promise<number> {
+    const overdue = await this.executions.find({
+      select: { id: true, waitTill: true },
+      where: {
+        status: 'waiting',
+        waitTill: LessThan(new Date(Date.now() - RESUME_GRACE_MS)),
+      },
+      take: 1000,
+    });
+    for (const e of overdue) await this.scheduleResume(e.id, e.waitTill!);
+    return overdue.length;
+  }
+
   private async finish(
     execution: Execution,
     status: Execution['status'],
     error: Execution['error'],
   ): Promise<void> {
     const finishedAt = new Date();
-    await this.executions.update(execution.id, { status, error, finishedAt });
+    await this.executions.update(execution.id, {
+      status,
+      error,
+      finishedAt,
+      waitTill: null,
+      waitState: null,
+    });
     await this.events.publish({
       type: 'execution.finished',
       executionId: execution.id,
@@ -349,7 +527,9 @@ export class ExecutionExecutor
     if (
       !errorWorkflowId ||
       execution.mode === 'manual' ||
-      execution.mode === 'error'
+      execution.mode === 'error' ||
+      // The calling workflow fails too and reports it.
+      execution.mode === 'subworkflow'
     ) {
       return;
     }
@@ -398,6 +578,16 @@ export class ExecutionExecutor
 }
 
 const MAX_SOURCE_CHAIN = 20;
+const MAX_SUBWORKFLOW_DEPTH = 10;
+/** Resume jobs normally fire on time; only re-schedule clearly overdue ones. */
+const RESUME_GRACE_MS = 60_000;
+
+export interface ExecutionOutcome {
+  status: Execution['status'];
+  error: Execution['error'];
+  /** First output of the last executed node (the result of a sub-workflow). */
+  lastOutput: Item[];
+}
 
 function toItems(
   pinData: Record<string, Record<string, unknown>[]> | undefined,

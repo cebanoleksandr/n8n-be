@@ -17,6 +17,8 @@ import { Workspace } from '../workspaces/workspace.entity.js';
 export const EXECUTION_STATUSES = [
   'queued',
   'running',
+  /** Paused by a Wait node until wait_till. */
+  'waiting',
   'success',
   'error',
   'canceled',
@@ -28,6 +30,8 @@ export const EXECUTION_MODES = [
   'schedule',
   /** Started by an Error Trigger because another run failed. */
   'error',
+  /** Called by an Execute Workflow node. */
+  'subworkflow',
 ] as const;
 export type ExecutionMode = (typeof EXECUTION_MODES)[number];
 
@@ -39,7 +43,7 @@ export interface ExecutionRunOptions {
 }
 
 export function isFinished(status: ExecutionStatus): boolean {
-  return status !== 'queued' && status !== 'running';
+  return status !== 'queued' && status !== 'running' && status !== 'waiting';
 }
 
 @Entity('executions')
@@ -86,6 +90,18 @@ export class Execution {
   })
   startNodeId: string | null;
 
+  /** For sub-workflow runs: the execution whose Execute Workflow node started it. */
+  @Column({ name: 'parent_execution_id', type: 'uuid', nullable: true })
+  parentExecutionId: string | null;
+
+  @ManyToOne(() => Execution, { onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'parent_execution_id' })
+  parentExecution?: Relation<Execution>;
+
+  /** Sub-workflow nesting level (0 for top-level runs). */
+  @Column({ type: 'int', default: 0 })
+  depth: number;
+
   /** Partial-run options of manual runs (see RunWorkflowDto). */
   @Column({ name: 'run_options', type: 'jsonb', nullable: true })
   runOptions: ExecutionRunOptions | null;
@@ -105,4 +121,15 @@ export class Execution {
 
   @Column({ name: 'finished_at', type: 'timestamptz', nullable: true })
   finishedAt: Date | null;
+
+  /** status 'waiting': when the Wait node resumes. */
+  @Column({ name: 'wait_till', type: 'timestamptz', nullable: true })
+  waitTill: Date | null;
+
+  /**
+   * status 'waiting': the engine's RunState (node outputs so far). Typed as
+   * opaque JSON because TypeORM's update types cannot handle the item type.
+   */
+  @Column({ name: 'wait_state', type: 'jsonb', nullable: true })
+  waitState: Record<string, unknown> | null;
 }

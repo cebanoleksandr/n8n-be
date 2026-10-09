@@ -12,7 +12,13 @@ import type { Queue } from 'bullmq';
 import { In, Repository } from 'typeorm';
 import type { Page } from '../../common/pagination.js';
 import type { BinaryRef, JsonObject } from '../../engine/types.js';
-import { JOB_RUN, type RunJobData, WORKFLOW_QUEUE } from '../../queue/queue.js';
+import {
+  JOB_RUN,
+  resumeJobId,
+  type RunJobData,
+  WORKFLOW_QUEUE,
+} from '../../queue/queue.js';
+import type { ExecutionEvent } from '../events/execution-events.js';
 import { ExecutionEventsService } from '../events/execution-events.service.js';
 import { WorkflowsService } from '../workflows/workflows.service.js';
 import { ExecutionStep } from './execution-step.entity.js';
@@ -30,6 +36,16 @@ import type {
 } from './executions.dto.js';
 
 const CANCEL_WAIT_MS = 10_000;
+const WATCH_BUFFER_LIMIT = 1000;
+
+export interface EventWatch {
+  /** Next buffered or future event matching `matches`; null after the timeout. */
+  next(
+    matches: (event: ExecutionEvent) => boolean,
+    timeoutMs: number,
+  ): Promise<ExecutionEvent | null>;
+  close(): void;
+}
 
 export interface StartExecutionOptions {
   mode: ExecutionMode;
@@ -37,7 +53,10 @@ export interface StartExecutionOptions {
   /** JSON objects for the trigger node; each becomes one item. */
   input?: JsonObject[];
   /** Files for the trigger items, by index (e.g. webhook uploads). */
-  binary?: Record<string, BinaryRef>[];
+  binary?: (Record<string, BinaryRef> | undefined)[];
+  /** Sub-workflow runs: the calling execution and nesting depth. */
+  parentExecutionId?: string;
+  depth?: number;
   /** false: the caller runs it itself (scheduled triggers already are on a worker). */
   enqueue?: boolean;
   /** Manual partial runs. */
@@ -80,6 +99,8 @@ export class ExecutionsService {
         mode: options.mode,
         startNodeId: options.startNodeId ?? null,
         runOptions,
+        parentExecutionId: options.parentExecutionId ?? null,
+        depth: options.depth ?? 0,
         input:
           options.input?.map((json, i) => {
             const binary = options.binary?.[i];
@@ -148,6 +169,39 @@ export class ExecutionsService {
   }
 
   /**
+   * Subscribes to execution events before something is started, so events
+   * published right after the start (a fast Respond to Webhook) are not lost.
+   */
+  async watchEvents(): Promise<EventWatch> {
+    const buffer: ExecutionEvent[] = [];
+    let wake: (() => void) | undefined;
+    const stop = await this.events.subscribe((event) => {
+      if (buffer.length >= WATCH_BUFFER_LIMIT) buffer.shift();
+      buffer.push(event);
+      wake?.();
+    });
+    return {
+      next: async (matches, timeoutMs) => {
+        const deadline = Date.now() + timeoutMs;
+        for (;;) {
+          const index = buffer.findIndex(matches);
+          if (index >= 0) return buffer.splice(index, 1)[0];
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) return null;
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, remaining);
+            wake = () => {
+              clearTimeout(timer);
+              resolve();
+            };
+          });
+        }
+      },
+      close: stop,
+    };
+  }
+
+  /**
    * Waits until the execution finishes or `timeoutMs` passes, then returns its
    * current state (which may still be queued/running after a timeout).
    */
@@ -164,13 +218,24 @@ export class ExecutionsService {
         // Subscribe before reading the status so the finish event cannot slip between.
         void this.events
           .subscribe((event) => {
-            if (event.type === 'execution.finished' && event.executionId === id)
+            // A paused (waiting) run is settled too: it may wait for days.
+            if (
+              event.executionId === id &&
+              (event.type === 'execution.finished' ||
+                event.type === 'execution.waiting')
+            )
               resolve();
           })
           .then(async (off) => {
             unsubscribe = off;
             const current = await this.executions.findOneBy({ id });
-            if (!current || isFinished(current.status)) resolve();
+            if (
+              !current ||
+              isFinished(current.status) ||
+              current.status === 'waiting'
+            ) {
+              resolve();
+            }
           })
           .catch((err: unknown) => {
             this.logger.warn(`Cannot wait for execution ${id}: ${String(err)}`);
@@ -206,12 +271,14 @@ export class ExecutionsService {
       name: 'ExecutionCanceledError',
       message: 'Execution was canceled',
     };
+    // Queued or paused runs are not on any worker: cancel them here.
     const dequeued = await this.executions.update(
-      { id, status: 'queued' },
-      { status: 'canceled', error, finishedAt },
+      { id, status: In(['queued', 'waiting']) },
+      { status: 'canceled', error, finishedAt, waitState: null },
     );
     if (dequeued.affected) {
       await this.queue.remove(id).catch(() => undefined);
+      await this.queue.remove(resumeJobId(id)).catch(() => undefined);
       await this.events.publish({
         type: 'execution.finished',
         executionId: id,
@@ -264,10 +331,12 @@ export function toSummary(e: Execution): ExecutionSummaryDto {
     workflowVersionId: e.workflowVersionId,
     status: e.status,
     mode: e.mode,
+    parentExecutionId: e.parentExecutionId,
     error: e.error,
     createdAt: e.createdAt,
     startedAt: e.startedAt,
     finishedAt: e.finishedAt,
+    waitTill: e.waitTill,
   };
 }
 

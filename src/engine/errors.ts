@@ -19,6 +19,17 @@ export class NodeOperationError extends Error {
   }
 }
 
+/**
+ * Thrown by a node (Wait) to pause the run until `resumeAt`. The runner turns
+ * it into a 'waiting' result with the state needed to continue later.
+ */
+export class SuspendExecution extends Error {
+  constructor(readonly resumeAt: Date) {
+    super(`Waiting until ${resumeAt.toISOString()}`);
+    this.name = 'SuspendExecution';
+  }
+}
+
 export interface GraphIssue {
   message: string;
   nodeId?: string;

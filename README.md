@@ -90,8 +90,7 @@ New migrations must be added to `src/database/migrations/index.ts`. Entities and
 src/
   engine/        Framework-free execution engine: graph types and validation,
                  expression resolver ({{ $json.x }}), WorkflowRunner
-  nodes/         Built-in nodes (manualTrigger, webhook, schedule, set, if, httpRequest)
-                 and credential types
+  nodes/         Built-in nodes and credential types (see "Nodes" below)
   queue/         BullMQ queue name, job names and payloads
   modules/
     workflows/   CRUD; every graph change creates an immutable WorkflowVersion
@@ -179,6 +178,19 @@ socket.on('execution-event', (e) => { /* see src/modules/events/execution-events
 ```
 
 Events: `execution.queued`, `execution.started`, `node.started`, `node.finished` (status and item counts, no data), `execution.finished`. Fetch `GET /api/executions/:id` for node output.
+
+## Nodes
+
+| Group | Nodes |
+|---|---|
+| Triggers | Manual Trigger, Webhook, Schedule, Error Trigger, Execute Workflow Trigger |
+| Flow | If, Switch (one output per rule, optional fallback), Merge (append / by position / join by field / choose input), Execute Workflow, Wait |
+| Transform | Set, Filter, Split Out, Aggregate, Sort, Limit, Remove Duplicates |
+| Actions | HTTP Request (auth credentials, files in and out), Respond to Webhook |
+
+- **Execute Workflow** runs another workflow that starts with an Execute Workflow Trigger. It can run once, once per item, or **once per batch**. Batches are how loops are expressed, so the graph stays acyclic. Waited sub-runs execute inside the caller's job, are recorded with `parentExecutionId`, stop when the caller is canceled or times out, and can be nested 10 levels deep.
+- **Wait** sleeps in the worker for up to 65 seconds. Longer waits pause the run: the status becomes `waiting`, node outputs are stored in `wait_state`, and a delayed BullMQ job resumes it, even days later and on any worker. Overdue waits are re-scheduled on worker start and hourly. Waiting runs can be canceled.
+- **Respond to Webhook** answers a Webhook trigger set to "Using a Respond to Webhook node" with a status, headers, and JSON, text or a file. The workflow continues after the response.
 
 ## Writing a node
 

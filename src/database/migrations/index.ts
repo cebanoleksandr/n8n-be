@@ -4,6 +4,7 @@ import { TriggersCredentialsQueue1791540619770 } from './1791540619770-TriggersC
 import { BinaryDataRetriesSettings1791542979945 } from './1791542979945-BinaryDataRetriesSettings.js';
 import { Auth1791544032543 } from './1791544032543-Auth.js';
 import { PartialRunsPinData1791544849275 } from './1791544849275-PartialRunsPinData.js';
+import { SubworkflowsAndWaits1791548795661 } from './1791548795661-SubworkflowsAndWaits.js';
 
 // Register every new migration here, in chronological order.
 export const migrations: (new () => MigrationInterface)[] = [
@@ -12,4 +13,5 @@ export const migrations: (new () => MigrationInterface)[] = [
   BinaryDataRetriesSettings1791542979945,
   Auth1791544032543,
   PartialRunsPinData1791544849275,
+  SubworkflowsAndWaits1791548795661,
 ];

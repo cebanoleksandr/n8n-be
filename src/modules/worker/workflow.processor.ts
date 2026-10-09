@@ -13,6 +13,7 @@ import {
   EXECUTION_PRUNE_SCHEDULER,
   JOB_BINARY_CLEANUP,
   JOB_EXECUTION_PRUNE,
+  JOB_RESUME,
   JOB_RUN,
   JOB_SCHEDULED_TRIGGER,
   type RunJobData,
@@ -57,15 +58,27 @@ export class WorkflowProcessor
       infer: true,
     });
     this.logger.log(`Worker started, concurrency ${this.worker.concurrency}`);
+    const recovered = await this.executor.recoverOverdueWaits();
+    if (recovered > 0)
+      this.logger.log(`Re-scheduled ${recovered} overdue waits`);
   }
 
   async process(job: Job): Promise<void> {
     switch (job.name) {
       case JOB_RUN:
-        return this.executor.execute((job.data as RunJobData).executionId);
+        await this.executor.execute((job.data as RunJobData).executionId);
+        return;
+      case JOB_RESUME:
+        await this.executor.execute(
+          (job.data as RunJobData).executionId,
+          undefined,
+          { resume: true },
+        );
+        return;
       case JOB_SCHEDULED_TRIGGER:
         return this.executor.runScheduled(job.data as ScheduledTriggerJobData);
       case JOB_EXECUTION_PRUNE: {
+        await this.executor.recoverOverdueWaits();
         const deleted = await this.pruner.prune();
         if (deleted > 0) this.logger.log(`Pruned ${deleted} old executions`);
         return;

@@ -8,7 +8,7 @@ export const WEBHOOK_METHODS = [
   'DELETE',
 ] as const;
 export type WebhookMethod = (typeof WEBHOOK_METHODS)[number];
-export type WebhookResponseMode = 'onReceived' | 'lastNode';
+export type WebhookResponseMode = 'onReceived' | 'lastNode' | 'responseNode';
 
 const PATH_PATTERN = /^[A-Za-z0-9_-]+(\/[A-Za-z0-9_-]+)*$/;
 
@@ -56,6 +56,7 @@ export const webhookNode: NodeType = {
             name: 'When the workflow finishes (last node output)',
             value: 'lastNode',
           },
+          { name: 'Using a Respond to Webhook node', value: 'responseNode' },
         ],
       },
     ],

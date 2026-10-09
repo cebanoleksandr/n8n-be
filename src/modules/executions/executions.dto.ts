@@ -91,11 +91,18 @@ export class ExecutionSummaryDto {
   @ApiProperty() workflowVersionId: string;
   @ApiProperty({ enum: STATUSES }) status: ExecutionStatus;
   @ApiProperty({ enum: EXECUTION_MODES }) mode: ExecutionMode;
+  @ApiProperty({
+    nullable: true,
+    description: 'Calling execution, for sub-workflow runs',
+  })
+  parentExecutionId: string | null;
   @ApiProperty({ type: ExecutionErrorDto, nullable: true })
   error: ExecutionErrorDto | null;
   @ApiProperty() createdAt: Date;
   @ApiProperty({ nullable: true }) startedAt: Date | null;
   @ApiProperty({ nullable: true }) finishedAt: Date | null;
+  @ApiProperty({ nullable: true, description: 'When a waiting run resumes' })
+  waitTill: Date | null;
 }
 
 export class ExecutionStepDto {

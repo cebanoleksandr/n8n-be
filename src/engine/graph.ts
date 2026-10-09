@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { GraphIssue } from './errors.js';
-import type { NodeRegistry } from './node-registry.js';
+import { type NodeRegistry, outputNamesOf } from './node-registry.js';
 import type {
   WorkflowConnection,
   WorkflowGraph,
@@ -78,7 +78,7 @@ export function validateGraph(
     }
     const fromType = registry.get(from.type, from.typeVersion);
     const toType = registry.get(to.type, to.typeVersion);
-    if (fromType && c.from.index >= fromType.description.outputs.length) {
+    if (fromType && c.from.index >= outputNamesOf(fromType, from).length) {
       issues.push({
         nodeId: from.id,
         message: `Node "${from.name}" has no output ${c.from.index}`,

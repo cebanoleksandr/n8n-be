@@ -1,4 +1,12 @@
-import type { NodeType, NodeTypeDescription } from './types.js';
+import type { NodeType, NodeTypeDescription, WorkflowNode } from './types.js';
+
+/** Output names of a node in a graph (static, or derived from its parameters). */
+export function outputNamesOf(
+  nodeType: NodeType,
+  node: WorkflowNode,
+): string[] {
+  return nodeType.outputsFor?.(node.parameters) ?? nodeType.description.outputs;
+}
 
 export class NodeRegistry {
   private readonly nodes = new Map<string, NodeType>();

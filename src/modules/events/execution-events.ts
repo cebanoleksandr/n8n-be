@@ -20,6 +20,20 @@ export type ExecutionEvent =
       createdAt: string;
     })
   | (Base & { type: 'execution.started'; startedAt: string })
+  | (Base & { type: 'execution.waiting'; waitTill: string })
+  | (Base & {
+      /** From Respond to Webhook; the API answers the waiting HTTP request. */
+      type: 'execution.response';
+      statusCode: number;
+      headers: Record<string, string>;
+      body?: unknown;
+      binary?: {
+        id: string;
+        fileName?: string;
+        mimeType: string;
+        size: number;
+      };
+    })
   | (Base & { type: 'node.started'; nodeId: string })
   | (Base & {
       type: 'node.finished';

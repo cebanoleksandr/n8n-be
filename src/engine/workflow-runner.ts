@@ -1,4 +1,8 @@
-import { NodeOperationError, WorkflowValidationError } from './errors.js';
+import {
+  NodeOperationError,
+  SuspendExecution,
+  WorkflowValidationError,
+} from './errors.js';
 import { type ExpressionData, resolveParameter } from './expression.js';
 import {
   incomingConnections,
@@ -6,11 +10,13 @@ import {
   validateGraph,
 } from './graph.js';
 import { httpRequest } from './http.js';
-import type { NodeRegistry } from './node-registry.js';
+import { type NodeRegistry, outputNamesOf } from './node-registry.js';
 import type {
   BinaryStore,
   CredentialsProvider,
   Item,
+  SubWorkflowRunner,
+  WebhookResponse,
   JsonObject,
   NodeExecuteContext,
   NodeType,
@@ -40,7 +46,17 @@ export interface NodeRunResult {
   pinned?: boolean;
 }
 
-export type RunStatus = 'success' | 'error' | 'canceled';
+export type RunStatus = 'success' | 'error' | 'canceled' | 'waiting';
+
+/** Everything needed to continue a run paused by a Wait node. */
+export interface RunState {
+  /** Outputs of every node that already produced data, by node id. */
+  outputs: Record<string, Item[][]>;
+  /** Nodes this run covers (after partial-run filtering). */
+  toRun: string[];
+  /** The Wait node; it completes (passing its input through) on resume. */
+  waitingNodeId: string;
+}
 
 export interface RunResult {
   /**
@@ -50,6 +66,9 @@ export interface RunResult {
   status: RunStatus;
   nodes: NodeRunResult[];
   error?: SerializedError & { nodeId?: string };
+  /** status 'waiting': when to resume, and the state to resume with. */
+  waitTill?: Date;
+  state?: RunState;
 }
 
 export interface RunHooks {
@@ -71,6 +90,8 @@ export interface RunOptions {
   startNodeId?: string;
   /** Start at any node using earlier outputs instead of at a trigger. */
   runFrom?: RunFrom;
+  /** Continue a run that a Wait node paused. */
+  resume?: RunState;
   /** Stop after this node: only it and its upstream nodes run. */
   destinationNodeId?: string;
   /** Test data by node id, used instead of executing those nodes (manual runs). */
@@ -82,6 +103,9 @@ export interface RunOptions {
   hooks?: RunHooks;
   credentials?: CredentialsProvider;
   binary?: BinaryStore;
+  subWorkflows?: SubWorkflowRunner;
+  /** Receives Respond to Webhook output; absent when nobody is waiting. */
+  onWebhookResponse?(response: WebhookResponse): Promise<void>;
   /** Exposed to expressions as $workflow and $execution. */
   workflow?: { id: string; name: string };
   execution?: { id: string; mode: string };
@@ -106,9 +130,34 @@ export class WorkflowRunner {
     const outputsByName = new Map<string, Item[][]>();
     const results: NodeRunResult[] = [];
 
-    let startNode: WorkflowNode;
+    let startNode: WorkflowNode | undefined;
     let toRun: Set<string>;
-    if (options.runFrom) {
+    if (options.resume) {
+      toRun = new Set(options.resume.toRun);
+      for (const [nodeId, output] of Object.entries(options.resume.outputs)) {
+        const node = graph.nodes.find((n) => n.id === nodeId);
+        if (!node) continue;
+        outputs.set(nodeId, output);
+        outputsByName.set(node.name, output);
+      }
+      const waiting = graph.nodes.find(
+        (n) => n.id === options.resume!.waitingNodeId,
+      );
+      if (waiting) {
+        const now = new Date();
+        const result: NodeRunResult = {
+          nodeId: waiting.id,
+          nodeName: waiting.name,
+          status: 'success',
+          startedAt: now,
+          finishedAt: now,
+          output: outputs.get(waiting.id) ?? [[]],
+          tries: 1,
+        };
+        results.push(result);
+        await hooks.nodeFinished?.(result);
+      }
+    } else if (options.runFrom) {
       startNode = this.findNode(graph, options.runFrom.nodeId);
       toRun = reachableFrom(graph, startNode.id);
       // Everything upstream keeps the earlier run's output.
@@ -150,16 +199,18 @@ export class WorkflowRunner {
       toRun = new Set([...toRun].filter((id) => upstream.has(id)));
     }
     const isTriggerStart =
+      startNode !== undefined &&
       this.registry.getOrThrow(startNode.type, startNode.typeVersion)
         .description.group === 'trigger';
+    const alreadyRun = new Set(outputs.keys());
 
     for (const node of topologicalOrder(graph)!) {
-      if (!toRun.has(node.id)) continue;
+      if (!toRun.has(node.id) || alreadyRun.has(node.id)) continue;
       if (signal.aborted) return { status: 'canceled', nodes: results };
 
       const nodeType = this.registry.getOrThrow(node.type, node.typeVersion);
       const inputs =
-        node.id === startNode.id && isTriggerStart
+        node.id === startNode?.id && isTriggerStart
           ? [options.triggerItems ?? [{ json: {} }]]
           : collectInputs(nodeType, incoming.get(node.id) ?? [], outputs);
 
@@ -169,7 +220,9 @@ export class WorkflowRunner {
       if (node.disabled) {
         const passThrough = [
           inputs[0] ?? [],
-          ...nodeType.description.outputs.slice(1).map(() => []),
+          ...outputNamesOf(nodeType, node)
+            .slice(1)
+            .map(() => []),
         ];
         outputs.set(node.id, passThrough);
         outputsByName.set(node.name, passThrough);
@@ -178,13 +231,35 @@ export class WorkflowRunner {
 
       await hooks.nodeStarted?.(node);
       const pinned = options.pinData?.[node.id];
-      const result = pinned
-        ? pinnedResult(node, nodeType, pinned)
-        : await this.executeNode(node, nodeType, inputs, {
-            outputsByName,
-            signal,
-            options,
-          });
+      let result: NodeRunResult;
+      try {
+        result = pinned
+          ? pinnedResult(node, nodeType, pinned)
+          : await this.executeNode(node, nodeType, inputs, {
+              outputsByName,
+              signal,
+              options,
+            });
+      } catch (err) {
+        if (!(err instanceof SuspendExecution)) throw err;
+        // The Wait node passes its input through once the run resumes.
+        outputs.set(node.id, [
+          inputs[0] ?? [],
+          ...outputNamesOf(nodeType, node)
+            .slice(1)
+            .map(() => []),
+        ]);
+        return {
+          status: 'waiting',
+          nodes: results,
+          waitTill: err.resumeAt,
+          state: {
+            outputs: Object.fromEntries(outputs),
+            toRun: [...toRun],
+            waitingNodeId: node.id,
+          },
+        };
+      }
       results.push(result);
       await hooks.nodeFinished?.(result);
 
@@ -253,7 +328,7 @@ export class WorkflowRunner {
   ): Promise<NodeRunResult> {
     const { signal } = run;
     const startedAt = new Date();
-    const outputCount = nodeType.description.outputs.length;
+    const outputCount = outputNamesOf(nodeType, node).length;
     const ctx = this.createContext(node, nodeType, inputs, run);
     const maxTries = node.retryOnFail
       ? Math.min(Math.max(node.maxTries ?? DEFAULT_TRIES, 1), MAX_TRIES)
@@ -274,6 +349,8 @@ export class WorkflowRunner {
           tries,
         };
       } catch (err) {
+        // A pause is not a failure: no retries, the runner handles it.
+        if (err instanceof SuspendExecution) throw err;
         if (tries < maxTries && !signal.aborted) {
           await sleep(
             node.waitBetweenTriesMs ?? DEFAULT_WAIT_BETWEEN_TRIES_MS,
@@ -351,6 +428,17 @@ export class WorkflowRunner {
         storeBinary: (data, meta) =>
           binary ? binary.put(data, meta) : noBinary(),
         readBinary: (ref) => (binary ? binary.get(ref) : noBinary()),
+        executeWorkflow: (workflowId, items, wait) => {
+          if (!options.subWorkflows) {
+            throw new NodeOperationError(
+              'Sub-workflows are not available here',
+            );
+          }
+          return options.subWorkflows.run(workflowId, items, wait);
+        },
+        respondToWebhook: async (response) => {
+          await options.onWebhookResponse?.(response);
+        },
       },
     };
   }
@@ -418,7 +506,9 @@ function pinnedResult(
     finishedAt: now,
     output: [
       structuredClone(items),
-      ...nodeType.description.outputs.slice(1).map(() => []),
+      ...outputNamesOf(nodeType, node)
+        .slice(1)
+        .map(() => []),
     ],
     tries: 0,
     pinned: true,

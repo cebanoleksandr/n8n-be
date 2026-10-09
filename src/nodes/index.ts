@@ -1,4 +1,18 @@
 import type { NodeType } from '../engine/types.js';
+import { aggregateNode } from './core/aggregate.node.js';
+import {
+  executeWorkflowNode,
+  executeWorkflowTriggerNode,
+} from './core/execute-workflow.node.js';
+import { filterNode } from './core/filter.node.js';
+import { limitNode } from './core/limit.node.js';
+import { mergeNode } from './core/merge.node.js';
+import { respondToWebhookNode } from './core/respond-to-webhook.node.js';
+import { removeDuplicatesNode } from './core/remove-duplicates.node.js';
+import { sortNode } from './core/sort.node.js';
+import { splitOutNode } from './core/split-out.node.js';
+import { switchNode } from './core/switch.node.js';
+import { waitNode } from './core/wait.node.js';
 import { errorTriggerNode } from './core/error-trigger.node.js';
 import { httpRequestNode } from './core/http-request.node.js';
 import { ifNode } from './core/if.node.js';
@@ -12,9 +26,21 @@ export const builtinNodes: NodeType[] = [
   webhookNode,
   scheduleNode,
   errorTriggerNode,
+  executeWorkflowTriggerNode,
   setNode,
   ifNode,
   httpRequestNode,
+  switchNode,
+  mergeNode,
+  filterNode,
+  splitOutNode,
+  aggregateNode,
+  sortNode,
+  limitNode,
+  removeDuplicatesNode,
+  executeWorkflowNode,
+  waitNode,
+  respondToWebhookNode,
 ];
 
 export { builtinCredentialTypes } from './credentials.js';

@@ -115,6 +115,11 @@ export interface NodeTypeDescription {
   inputs: number;
   /** Output names; their order defines output indexes. */
   outputs: string[];
+  /**
+   * Set when the outputs depend on parameters (see NodeType.outputsFor);
+   * describes the rule for the editor, `outputs` is then the default.
+   */
+  dynamicOutputs?: string;
   properties: PropertySchema[];
   /** Credential types this node can use. */
   credentials?: NodeCredentialDescription[];
@@ -130,6 +135,20 @@ export interface CredentialTypeDescription {
   type: string;
   displayName: string;
   properties: PropertySchema[];
+}
+
+export interface WebhookResponse {
+  statusCode: number;
+  headers: Record<string, string>;
+  /** JSON value or text; ignored when `binary` is set. */
+  body?: unknown;
+  /** Send this stored file as the response body. */
+  binary?: BinaryRef;
+}
+
+/** Starts sub-workflows for the Execute Workflow node. */
+export interface SubWorkflowRunner {
+  run(workflowId: string, items: Item[], wait: boolean): Promise<Item[]>;
 }
 
 /** Resolves decrypted credential data for the workspace the run belongs to. */
@@ -164,11 +183,24 @@ export interface NodeExecuteContext {
     /** Store a file and get a reference to attach to an item's `binary`. */
     storeBinary(data: Buffer, meta: BinaryMeta): Promise<BinaryRef>;
     readBinary(ref: BinaryRef): Promise<Buffer>;
+    /**
+     * Runs another workflow of the same workspace with `items` as its trigger
+     * input. With wait, resolves to the output of its last executed node.
+     */
+    executeWorkflow(
+      workflowId: string,
+      items: Item[],
+      wait: boolean,
+    ): Promise<Item[]>;
+    /** Answers the webhook request that started this run (first call wins). */
+    respondToWebhook(response: WebhookResponse): Promise<void>;
   };
 }
 
 export interface NodeType {
   description: NodeTypeDescription;
+  /** Output names for a configured node, when they depend on its parameters. */
+  outputsFor?(parameters: Record<string, unknown>): string[];
   /** Returns one item array per output. */
   execute(ctx: NodeExecuteContext): Promise<Item[][]>;
 }

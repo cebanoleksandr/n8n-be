@@ -7,6 +7,11 @@ export const WORKFLOW_QUEUE = 'workflows';
 export const JOB_RUN = 'run';
 /** Fired by a BullMQ job scheduler for a Schedule trigger node. */
 export const JOB_SCHEDULED_TRIGGER = 'scheduled-trigger';
+/** Delayed: continue an execution paused by a Wait node. */
+export const JOB_RESUME = 'resume';
+// BullMQ rejects ":" in custom job ids.
+export const resumeJobId = (executionId: string) => `resume-${executionId}`;
+
 /** Hourly: delete stored files whose workflow was deleted. */
 export const JOB_BINARY_CLEANUP = 'binary-cleanup';
 export const BINARY_CLEANUP_SCHEDULER = 'maintenance:binary-cleanup';
