@@ -1,4 +1,5 @@
-import { Module } from '@nestjs/common';
+import { Injectable, Module, type OnModuleDestroy } from '@nestjs/common';
+import { codeSandbox } from '../../sandbox/sandbox-client.js';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { QueueModule } from '../../queue/queue.js';
 import { BinaryDataModule } from '../binary-data/binary-data.module.js';
@@ -10,6 +11,14 @@ import { ExecutionExecutor } from './execution-executor.service.js';
 import { ExecutionPruner } from './execution-pruner.service.js';
 import { WorkflowProcessor } from './workflow.processor.js';
 
+/** Stops the Code node sandbox process with the worker. */
+@Injectable()
+class CodeSandboxLifecycle implements OnModuleDestroy {
+  onModuleDestroy(): void {
+    codeSandbox.close();
+  }
+}
+
 /** Imported only when the process runs with APP_ROLE=worker or all. */
 @Module({
   imports: [
@@ -19,6 +28,11 @@ import { WorkflowProcessor } from './workflow.processor.js';
     CredentialsModule,
     BinaryDataModule,
   ],
-  providers: [ExecutionExecutor, ExecutionPruner, WorkflowProcessor],
+  providers: [
+    ExecutionExecutor,
+    ExecutionPruner,
+    WorkflowProcessor,
+    CodeSandboxLifecycle,
+  ],
 })
 export class WorkerModule {}

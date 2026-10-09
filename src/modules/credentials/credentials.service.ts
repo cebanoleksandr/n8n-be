@@ -12,6 +12,11 @@ import type {
 } from '../../engine/types.js';
 import { builtinCredentialTypes } from '../../nodes/index.js';
 import { Cipher } from './cipher.js';
+import {
+  OAuth2Service,
+  TOKEN_FIELD,
+  type TokenData,
+} from './oauth2.service.js';
 import { Credential } from './credential.entity.js';
 import type {
   CreateCredentialDto,
@@ -31,6 +36,7 @@ export class CredentialsService {
     @InjectRepository(Credential)
     private readonly credentials: Repository<Credential>,
     private readonly cipher: Cipher,
+    private readonly oauth2: OAuth2Service,
   ) {}
 
   listTypes(): CredentialTypeDescription[] {
@@ -53,7 +59,7 @@ export class CredentialsService {
     workspaceId: string,
     dto: CreateCredentialDto,
   ): Promise<CredentialDto> {
-    const data = this.validate(dto.type, dto.data);
+    const data = this.validate(dto.type, withoutTokens(dto.data));
     const saved = await this.credentials.save(
       this.credentials.create({
         workspaceId,
@@ -73,10 +79,13 @@ export class CredentialsService {
     const credential = await this.findOrFail(workspaceId, id);
     if (dto.name !== undefined) credential.name = dto.name;
     if (dto.data) {
-      const merged = {
-        ...this.cipher.decrypt<CredentialData>(credential.data),
-        ...dto.data,
-      };
+      const current = this.cipher.decrypt<CredentialData>(credential.data);
+      const patch = withoutTokens(dto.data);
+      const merged: CredentialData = { ...current, ...patch };
+      // Tokens belong to the old client/endpoint settings.
+      if (OAUTH_SETTINGS.some((k) => k in patch && patch[k] !== current[k])) {
+        delete merged[TOKEN_FIELD];
+      }
       credential.data = this.cipher.encrypt(
         this.validate(credential.type, merged),
       );
@@ -108,8 +117,11 @@ export class CredentialsService {
             `Credential "${credential.name}" is of type ${credential.type}, expected ${type}`,
           );
         }
-        return this.cipher.decrypt<CredentialData>(credential.data);
+        return withoutTokens(
+          this.cipher.decrypt<CredentialData>(credential.data),
+        );
       },
+      oauth2AccessToken: (id) => this.oauth2.accessToken(workspaceId, id),
     };
   }
 
@@ -133,7 +145,8 @@ export class CredentialsService {
     const issues: string[] = [];
     const known = new Set(definition.properties.map((p) => p.name));
     for (const key of Object.keys(data)) {
-      if (!known.has(key)) issues.push(`Unknown field "${key}"`);
+      if (!known.has(key) && key !== TOKEN_FIELD)
+        issues.push(`Unknown field "${key}"`);
     }
     for (const p of definition.properties) {
       const value = data[p.name];
@@ -160,15 +173,40 @@ export class CredentialsService {
         ?.properties.filter((p) => p.secret)
         .map((p) => p.name) ?? [],
     );
+    const tokens = data[TOKEN_FIELD] as TokenData | undefined;
     return {
       id: c.id,
       name: c.name,
       type: c.type,
       data: Object.fromEntries(
-        Object.entries(data).filter(([k]) => !secret.has(k)),
+        Object.entries(data).filter(
+          ([k]) => !secret.has(k) && k !== TOKEN_FIELD,
+        ),
       ),
+      ...(this.types.get(c.type)?.oauth2 && {
+        oauth2: {
+          connected: tokens !== undefined,
+          expiresAt: tokens?.expiresAt ? new Date(tokens.expiresAt) : null,
+        },
+      }),
       createdAt: c.createdAt,
       updatedAt: c.updatedAt,
     };
   }
+}
+
+/** OAuth2 settings whose change invalidates stored tokens. */
+const OAUTH_SETTINGS = [
+  'grantType',
+  'authUrl',
+  'accessTokenUrl',
+  'clientId',
+  'clientSecret',
+  'scope',
+];
+
+/** Users can never write (or, through nodes, read) the server-managed tokens. */
+function withoutTokens(data: CredentialData): CredentialData {
+  const { [TOKEN_FIELD]: _tokens, ...rest } = data;
+  return rest;
 }

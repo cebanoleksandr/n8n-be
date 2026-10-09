@@ -393,6 +393,14 @@ export class WorkflowRunner {
     },
   ): NodeExecuteContext {
     const binary = options.binary;
+    const selectedCredential = (type: string) => {
+      const id = node.credentials?.[type];
+      if (!id) throw new NodeOperationError(`No "${type}" credential selected`);
+      if (!options.credentials) {
+        throw new NodeOperationError('Credentials are not available');
+      }
+      return { provider: options.credentials, id };
+    };
     const noBinary = (): never => {
       throw new NodeOperationError('Binary data storage is not configured');
     };
@@ -413,15 +421,21 @@ export class WorkflowRunner {
         };
         return resolveParameter(raw, data) as T;
       },
+      getNodeOutputs: () =>
+        Object.fromEntries(
+          [...outputsByName].map(([name, output]) => [name, output[0] ?? []]),
+        ),
+      getRunInfo: () => ({
+        workflow: options.workflow,
+        execution: options.execution,
+      }),
       getCredentials: async <T>(type: string) => {
-        const id = node.credentials?.[type];
-        if (!id) {
-          throw new NodeOperationError(`No "${type}" credential selected`);
-        }
-        if (!options.credentials) {
-          throw new NodeOperationError('Credentials are not available');
-        }
-        return (await options.credentials.get(id, type)) as T;
+        const { provider, id } = selectedCredential(type);
+        return (await provider.get(id, type)) as T;
+      },
+      getOAuth2AccessToken: (type: string) => {
+        const { provider, id } = selectedCredential(type);
+        return provider.oauth2AccessToken(id);
       },
       helpers: {
         httpRequest: (opts) => httpRequest(opts, signal),

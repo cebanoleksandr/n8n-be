@@ -77,6 +77,8 @@ export type PropertyType =
   | 'boolean'
   | 'options'
   | 'json'
+  /** Source code (JavaScript); the editor shows a code editor. */
+  | 'code'
   /** Repeated group of sub-properties, e.g. a list of headers. Value is an array of objects. */
   | 'list';
 
@@ -135,6 +137,8 @@ export interface CredentialTypeDescription {
   type: string;
   displayName: string;
   properties: PropertySchema[];
+  /** Tokens are obtained through the OAuth2 flow and managed by the server. */
+  oauth2?: boolean;
 }
 
 export interface WebhookResponse {
@@ -154,6 +158,8 @@ export interface SubWorkflowRunner {
 /** Resolves decrypted credential data for the workspace the run belongs to. */
 export interface CredentialsProvider {
   get(id: string, type: string): Promise<Record<string, unknown>>;
+  /** A valid access token of an OAuth2 credential (refreshed when needed). */
+  oauth2AccessToken(id: string): Promise<string>;
 }
 
 export interface HttpRequestOptions {
@@ -176,8 +182,17 @@ export interface NodeExecuteContext {
   getInputItems(inputIndex?: number): Item[];
   /** Returns the parameter with expressions resolved against the item at `itemIndex`. */
   getParameter<T = unknown>(name: string, itemIndex: number): T;
+  /** First output of every node that ran before this one, by node name. */
+  getNodeOutputs(): Record<string, Item[]>;
+  /** The run this node belongs to, as exposed to expressions. */
+  getRunInfo(): {
+    workflow?: { id: string; name: string };
+    execution?: { id: string; mode: string };
+  };
   /** Decrypted data of the credential selected on this node for `type`. */
   getCredentials<T = Record<string, unknown>>(type: string): Promise<T>;
+  /** Access token of the OAuth2 credential selected for `type`. */
+  getOAuth2AccessToken(type: string): Promise<string>;
   helpers: {
     httpRequest(options: HttpRequestOptions): Promise<HttpResponse>;
     /** Store a file and get a reference to attach to an item's `binary`. */

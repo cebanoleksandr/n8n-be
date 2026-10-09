@@ -16,6 +16,11 @@ export const envSchema = z.object({
   /** api: HTTP + WebSocket only; worker: executes queued runs; all: both (dev). */
   APP_ROLE: z.enum(APP_ROLES).default('all'),
   REDIS_URL: z.url().default('redis://localhost:6390'),
+  /**
+   * Public base URL of the API (used for OAuth2 redirect URIs). Defaults to
+   * http://localhost:<PORT>.
+   */
+  PUBLIC_URL: z.url().optional(),
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(5),
   /** 32 random bytes, base64. Generate with `openssl rand -base64 32`. */
   ENCRYPTION_KEY: z

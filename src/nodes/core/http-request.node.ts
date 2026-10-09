@@ -19,7 +19,12 @@ interface KeyValue {
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD'];
 const BODY_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'];
-const AUTH_TYPES = ['httpHeaderAuth', 'httpBasicAuth', 'httpBearerAuth'];
+const AUTH_TYPES = [
+  'httpHeaderAuth',
+  'httpBasicAuth',
+  'httpBearerAuth',
+  'oAuth2Api',
+];
 
 export const httpRequestNode: NodeType = {
   description: {
@@ -46,6 +51,7 @@ export const httpRequestNode: NodeType = {
           { name: 'Header Auth', value: 'httpHeaderAuth' },
           { name: 'Basic Auth', value: 'httpBasicAuth' },
           { name: 'Bearer Token', value: 'httpBearerAuth' },
+          { name: 'OAuth2', value: 'oAuth2Api' },
         ],
       },
       {
@@ -258,6 +264,10 @@ async function resolveAuthHeaders(
       const c = await ctx.getCredentials<HttpBearerAuth>(auth);
       return { authorization: `Bearer ${c.token}` };
     }
+    case 'oAuth2Api':
+      return {
+        authorization: `Bearer ${await ctx.getOAuth2AccessToken(auth)}`,
+      };
     case 'none':
     case undefined:
       return {};

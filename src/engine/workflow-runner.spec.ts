@@ -590,6 +590,7 @@ describe('WorkflowRunner', () => {
           requested.push(`${id}:${type}`);
           return { user: 'ann', password: 'pw' };
         },
+        oauth2AccessToken: async () => 'unused',
       };
       const result = await runner.run({
         graph: {

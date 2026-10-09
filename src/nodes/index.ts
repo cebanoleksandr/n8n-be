@@ -1,4 +1,9 @@
 import type { NodeType } from '../engine/types.js';
+import { postgresNode } from './integrations/postgres.node.js';
+import { sendEmailNode } from './integrations/send-email.node.js';
+import { slackNode } from './integrations/slack.node.js';
+import { telegramNode } from './integrations/telegram.node.js';
+import { codeNode } from './core/code.node.js';
 import { aggregateNode } from './core/aggregate.node.js';
 import {
   executeWorkflowNode,
@@ -41,6 +46,11 @@ export const builtinNodes: NodeType[] = [
   executeWorkflowNode,
   waitNode,
   respondToWebhookNode,
+  codeNode,
+  telegramNode,
+  slackNode,
+  postgresNode,
+  sendEmailNode,
 ];
 
 export { builtinCredentialTypes } from './credentials.js';

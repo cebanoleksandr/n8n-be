@@ -36,11 +36,18 @@ describe('Credentials (e2e)', () => {
 
   it('lists credential types', async () => {
     const res = await t.api().get('/api/credential-types').expect(200);
-    expect(res.body.map((c: { type: string }) => c.type)).toEqual([
-      'httpHeaderAuth',
-      'httpBasicAuth',
-      'httpBearerAuth',
-    ]);
+    expect(res.body.map((c: { type: string }) => c.type)).toEqual(
+      expect.arrayContaining([
+        'httpHeaderAuth',
+        'httpBasicAuth',
+        'httpBearerAuth',
+        'oAuth2Api',
+        'telegramApi',
+        'slackApi',
+        'postgres',
+        'smtp',
+      ]),
+    );
   });
 
   it('encrypts data and never returns secrets', async () => {

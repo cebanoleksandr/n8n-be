@@ -71,6 +71,7 @@ BullMQ job scheduler (cron) ─┘                                              
 - **Timeouts and cancel** share one AbortSignal per run. The timeout is `settings.timeoutSeconds`, capped by `EXECUTION_TIMEOUT_MAX_SECONDS`, and a timed-out run ends as `error` (`ExecutionTimeoutError`). `POST /api/executions/:id/cancel` cancels a queued run directly. For a running one the API publishes a cancel request over Redis, and the worker holding the run aborts it. The runner stops between nodes, during retry waits and mid-node: it stops waiting for the node's promise even if the node ignores the signal.
 - **Error workflows**: `settings.errorWorkflowId` points to a workflow with an **Error Trigger**. When a webhook or schedule run fails, that workflow is started with `{ execution: { id, mode, error, lastNodeExecuted, startedAt }, workflow: { id, name } }`. As in n8n, manual runs and failures of error workflows do not trigger it.
 - **Binary data**: items carry `binary: { [field]: { id, fileName, mimeType, size } }`, and the bytes live in S3 under `<workspaceId>/<id>`, with metadata in `binary_data`. Nodes use `ctx.helpers.storeBinary/readBinary`. Webhooks store multipart files and raw non-JSON bodies (field `data`). Deleting a workflow orphans its files, and an hourly job deletes them. Any S3 service works; compose uses SeaweedFS because MinIO no longer publishes public images.
+- **OAuth2 credentials** (`oAuth2Api`) support the authorization code grant (with PKCE) and client credentials. The editor opens `GET /api/credentials/:id/oauth2/auth-url` in a popup. The provider redirects to `<PUBLIC_URL>/api/oauth2/callback`, which is the URI to register at the provider; the one-time `state` lives in Redis for 10 minutes. Tokens are stored inside the encrypted credential, are never returned by the API or readable by nodes, refresh automatically before expiry, and are dropped when the client settings change. Nodes call `ctx.getOAuth2AccessToken(type)`.
 - **Credentials** are encrypted with AES-256-GCM using `ENCRYPTION_KEY`. The API never returns fields marked `secret`. `PUT` merges data, so omitted fields keep their stored values. If the key is lost, stored credentials become unreadable.
 
 ## Scripts
@@ -140,7 +141,9 @@ All `/api/*` routes need `Authorization: Bearer <token>` except setup, login, re
 | POST | `/api/expressions/evaluate` | Evaluate `{ expression, json?, nodes?, itemIndex? }` → `{ value }` |
 | GET | `/api/credential-types` | Credential type descriptions |
 | GET, POST | `/api/credentials` | List (`?type=`) / create |
-| GET, PUT, DELETE | `/api/credentials/:id` | Read (no secrets) / update (merge) / delete |
+| GET, PUT, DELETE | `/api/credentials/:id` | Read (no secrets; OAuth2: `oauth2.connected`) / update (merge) / delete |
+| GET | `/api/credentials/:id/oauth2/auth-url` | Start connecting an OAuth2 credential |
+| GET | `/api/oauth2/redirect-uri`, `/api/oauth2/callback` | Redirect URI to register / provider callback (public) |
 | ANY | `/webhook/<path>` | Webhook triggers of active workflows |
 | GET | `/api/health`, `/api/health/ready` | Liveness / readiness (DB, Redis, S3) |
 
@@ -185,11 +188,13 @@ Events: `execution.queued`, `execution.started`, `node.started`, `node.finished`
 |---|---|
 | Triggers | Manual Trigger, Webhook, Schedule, Error Trigger, Execute Workflow Trigger |
 | Flow | If, Switch (one output per rule, optional fallback), Merge (append / by position / join by field / choose input), Execute Workflow, Wait |
-| Transform | Set, Filter, Split Out, Aggregate, Sort, Limit, Remove Duplicates |
-| Actions | HTTP Request (auth credentials, files in and out), Respond to Webhook |
+| Transform | Set, Filter, Split Out, Aggregate, Sort, Limit, Remove Duplicates, Code |
+| Actions | HTTP Request (header/basic/bearer/OAuth2 auth, files in and out), Respond to Webhook |
+| Integrations | Telegram (messages, documents), Slack (messages, blocks, threads), Postgres (parameterized queries, bulk insert), Send Email (SMTP with attachments) |
 
 - **Execute Workflow** runs another workflow that starts with an Execute Workflow Trigger. It can run once, once per item, or **once per batch**. Batches are how loops are expressed, so the graph stays acyclic. Waited sub-runs execute inside the caller's job, are recorded with `parentExecutionId`, stop when the caller is canceled or times out, and can be nested 10 levels deep.
 - **Wait** sleeps in the worker for up to 65 seconds. Longer waits pause the run: the status becomes `waiting`, node outputs are stored in `wait_state`, and a delayed BullMQ job resumes it, even days later and on any worker. Overdue waits are re-scheduled on worker start and hourly. Waiting runs can be canceled.
+- **Code** runs JavaScript in an `isolated-vm` isolate. The isolate has no Node APIs, network or file system, and is limited in memory and time, including async code that never settles. Isolates live in a separate sandbox process (`src/sandbox`), started with `--no-node-snapshot` as isolated-vm requires on Node ≥ 20, so a V8 crash only restarts the sandbox, not the worker. Available inside: `items`/`$input`, `$('Node').all()`, `$json`/`$itemIndex` (per-item mode), `$workflow`, `$execution`; `console.log` output is attached to errors.
 - **Respond to Webhook** answers a Webhook trigger set to "Using a Respond to Webhook node" with a status, headers, and JSON, text or a file. The workflow continues after the response.
 
 ## Writing a node

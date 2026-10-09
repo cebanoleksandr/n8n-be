@@ -52,6 +52,11 @@ export class CredentialDto {
     description: 'Non-secret fields only',
   })
   data: Record<string, unknown>;
+  @ApiPropertyOptional({
+    description: 'OAuth2 credentials only: whether tokens are stored',
+    example: { connected: true, expiresAt: '2026-10-09T12:00:00.000Z' },
+  })
+  oauth2?: { connected: boolean; expiresAt: Date | null };
   @ApiProperty() createdAt: Date;
   @ApiProperty() updatedAt: Date;
 }

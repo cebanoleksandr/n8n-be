@@ -13,6 +13,7 @@ import type { AddressInfo } from 'node:net';
  */
 export async function startMockServer() {
   const calls = new Map<string, number>();
+  const tokenRequests: Record<string, string>[] = [];
   const server: Server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const chunks: Buffer[] = [];
@@ -40,6 +41,40 @@ export async function startMockServer() {
             ? json(503, { attempt: n })
             : json(200, { attempt: n });
         }
+        case '/headers':
+          return json(200, {
+            authorization: req.headers.authorization ?? null,
+          });
+        case '/oauth/token': {
+          // Minimal OAuth2 token endpoint (form-encoded requests).
+          const form = new URLSearchParams(body.toString());
+          tokenRequests.push(Object.fromEntries(form));
+          const grant = form.get('grant_type');
+          if (grant === 'authorization_code') {
+            if (
+              form.get('code') !== 'good-code' ||
+              !form.get('code_verifier')
+            ) {
+              return json(400, { error: 'invalid_grant' });
+            }
+            // Expires at once, so the next use must refresh.
+            return json(200, {
+              access_token: 'access-1',
+              refresh_token: 'refresh-1',
+              expires_in: 1,
+            });
+          }
+          if (
+            grant === 'refresh_token' &&
+            form.get('refresh_token') === 'refresh-1'
+          ) {
+            return json(200, { access_token: 'access-2', expires_in: 3600 });
+          }
+          if (grant === 'client_credentials') {
+            return json(200, { access_token: 'cc-token', expires_in: 3600 });
+          }
+          return json(400, { error: 'unsupported_grant_type' });
+        }
         case '/fail':
           return json(500, { error: 'boom' });
         case '/file':
@@ -65,6 +100,8 @@ export async function startMockServer() {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   return {
     url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    /** Bodies received by /oauth/token. */
+    tokenRequests,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }
