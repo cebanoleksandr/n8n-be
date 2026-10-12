@@ -13,7 +13,7 @@ npm run start:dev                 # APP_ROLE=all: API + worker in one process; m
 ```
 
 - API: http://localhost:3000/api
-- First run: create the owner account with `POST /api/auth/setup { email, name, password }`, or from the frontend
+- Sign up with `POST /api/auth/register { email, name, password, workspaceName? }`, or from the frontend
 - Swagger UI: http://localhost:3000/docs (OpenAPI JSON at `/docs/openapi.json`; the frontend generates its types from it)
 - Webhooks: http://localhost:3000/webhook/&lt;path&gt;
 - WebSocket: socket.io namespace `/executions`
@@ -50,9 +50,10 @@ BullMQ job scheduler (cron) ─┘                                              
 - **Access token**: a JWT (HS256, 15 min, `ACCESS_TOKEN_TTL_SECONDS`) sent as `Authorization: Bearer <token>`.
 - **Refresh token**: an opaque random token in the httpOnly cookie `flow_refresh` (path `/api/auth`, SameSite=Lax, Secure in production). Only its SHA-256 is stored. `POST /api/auth/refresh` rotates it, and reusing an already-rotated token revokes every session of that login (theft detection). Logout and password change revoke sessions too.
 - **Passwords** are hashed with scrypt (N=2¹⁷, r=8, p=1). Login is rate-limited in Redis to 5 attempts per email and 30 per IP per 15 minutes. Unknown emails take as long as wrong passwords.
-- **Deny by default**: a global guard requires a token and workspace membership on every route unless it is marked `@Public()` (setup, login, refresh, invitations, health, webhooks) or `@UserOnly()` (`/auth/me`, `/auth/password`).
+- **Deny by default**: a global guard requires a token and workspace membership on every route unless it is marked `@Public()` (register, login, refresh, invitations, health, webhooks) or `@UserOnly()` (`/auth/me`, `/auth/password`).
 - **Workspaces and roles**: `viewer` reads, `editor` creates, edits and runs workflows and manages credentials, `admin` manages members and invitations (except admins and owners), and `owner` manages everything. A workspace always keeps at least one owner. A user in several workspaces picks one with the `X-Workspace-Id` header. All data access is scoped to that workspace, so another workspace's ids return 404.
-- **Onboarding**: the first user is created with `POST /api/auth/setup`, which works only while no users exist. Everyone else joins by invitation: an admin calls `POST /api/workspace/invitations` and gets a one-time token valid for 7 days. Email delivery is not built yet, so the frontend shows the link. The invitee calls `POST /api/auth/invitations/:token/accept`.
+- **Sign-up**: `POST /api/auth/register` creates the account plus a workspace it owns, and logs in. The very first account takes over the pre-existing default workspace, so data created before accounts existed is not orphaned. Sign-up is limited to 10 per IP per hour and can be turned off with `REGISTRATION_ENABLED=false`, leaving invitations only.
+- **Teams**: an admin invites people into their workspace with `POST /api/workspace/invitations` and gets a one-time token valid for 7 days. Email delivery is not built yet, so the frontend shows the link. The invitee calls `POST /api/auth/invitations/:token/accept`, which creates the account if needed.
 - **WebSocket**: connect with `io('/executions', { auth: { token } })`. Each subscription is checked against the user's workspaces.
 - **Fetch with cookies**: the frontend must send `credentials: 'include'` (axios: `withCredentials: true`) on `/api/auth/*` calls, and its origin must be in `CORS_ORIGINS`.
 
@@ -111,11 +112,11 @@ src/
 
 ## API
 
-All `/api/*` routes need `Authorization: Bearer <token>` except setup, login, refresh, logout, invitation lookup/accept and health.
+All `/api/*` routes need `Authorization: Bearer <token>` except register, login, refresh, logout, invitation lookup/accept and health.
 
 | Method | Path | |
 |---|---|---|
-| GET, POST | `/api/auth/setup` | First-run status / create the first owner |
+| POST | `/api/auth/register` | Sign up: account + own workspace, logged in |
 | POST | `/api/auth/login`, `/refresh`, `/logout` | Sessions (refresh token in cookie) |
 | GET | `/api/auth/me` | User and workspace memberships |
 | POST | `/api/auth/password` | Change password (signs out other sessions) |

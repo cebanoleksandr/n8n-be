@@ -9,13 +9,13 @@ const email = z
 const password = z.string().min(8, 'must be at least 8 characters').max(256);
 const name = z.string().trim().min(1).max(128);
 
-export const setupSchema = z.object({
+export const registerSchema = z.object({
   email,
   name,
   password,
   workspaceName: z.string().trim().min(1).max(128).optional(),
 });
-export class SetupDto {
+export class RegisterDto {
   @ApiProperty() email: string;
   @ApiProperty() name: string;
   @ApiProperty({ minLength: 8 }) password: string;

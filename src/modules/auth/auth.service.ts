@@ -1,14 +1,17 @@
 import {
   ConflictException,
+  ForbiddenException,
   HttpException,
   HttpStatus,
   Injectable,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
 import { DataSource, type EntityManager, IsNull, Repository } from 'typeorm';
+import type { Env } from '../../config/env.js';
 import { RateLimiter } from '../../redis/rate-limiter.js';
 import { Invitation } from '../workspaces/invitation.entity.js';
 import { DEFAULT_WORKSPACE_ID } from '../workspaces/default-workspace.js';
@@ -19,7 +22,7 @@ import type {
   ChangePasswordDto,
   LoginDto,
   MeDto,
-  SetupDto,
+  RegisterDto,
   UserDto,
 } from './auth.dto.js';
 import { dummyPasswordHash, hashPassword, verifyPassword } from './password.js';
@@ -36,6 +39,7 @@ export interface Session {
 }
 
 const LOGIN_LIMIT = { perEmail: 5, perIp: 30, windowSeconds: 15 * 60 };
+const REGISTER_LIMIT = { perIp: 10, windowSeconds: 60 * 60 };
 
 @Injectable()
 export class AuthService {
@@ -50,36 +54,95 @@ export class AuthService {
     private readonly invitations: Repository<Invitation>,
     private readonly tokens: TokensService,
     private readonly limiter: RateLimiter,
-  ) {}
-
-  async needsSetup(): Promise<boolean> {
-    return !(await this.users.exists());
+    config: ConfigService<Env, true>,
+  ) {
+    this.registrationEnabled = config.get('REGISTRATION_ENABLED', {
+      infer: true,
+    });
   }
 
-  /** Creates the first user as owner of the default workspace. Works once. */
-  async setup(dto: SetupDto): Promise<Session> {
-    const passwordHash = await hashPassword(dto.password);
-    const user = await this.dataSource.transaction(async (em) => {
-      // Serialize concurrent setups so only one owner can ever be created this way.
-      await em.query(`SELECT pg_advisory_xact_lock(hashtext('flow:setup'))`);
-      if (await em.exists(User)) {
-        throw new ConflictException('Setup is already done; log in instead');
-      }
-      const created = await em.save(
-        em.create(User, { email: dto.email, name: dto.name, passwordHash }),
+  private readonly registrationEnabled: boolean;
+
+  /**
+   * Open sign-up: the new user owns a workspace of their own. The very first
+   * account takes over the default workspace (and any data created before
+   * accounts existed); everyone after gets a fresh one.
+   */
+  async register(dto: RegisterDto, ip: string): Promise<Session> {
+    if (!this.registrationEnabled) {
+      throw new ForbiddenException(
+        'Registration is disabled; ask for an invitation',
       );
-      if (dto.workspaceName) {
-        await em.update(Workspace, DEFAULT_WORKSPACE_ID, {
-          name: dto.workspaceName,
+    }
+    const retryAfter = await this.limiter.hit(
+      `register:${ip}`,
+      REGISTER_LIMIT.perIp,
+      REGISTER_LIMIT.windowSeconds,
+    );
+    if (retryAfter > 0) {
+      throw new HttpException(
+        { message: 'Too many registrations from this address', retryAfter },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+    if (await this.users.existsBy({ email: dto.email })) {
+      throw new ConflictException(
+        'This email is already registered; log in instead',
+      );
+    }
+
+    const passwordHash = await hashPassword(dto.password);
+    let user: User;
+    try {
+      user = await this.dataSource.transaction(async (em) => {
+        const created = await em.save(
+          em.create(User, { email: dto.email, name: dto.name, passwordHash }),
+        );
+        // Lock the default workspace so two first sign-ups cannot both claim it.
+        const unclaimed = await em.findOne(Workspace, {
+          where: { id: DEFAULT_WORKSPACE_ID },
+          lock: { mode: 'pessimistic_write' },
         });
-      }
-      await em.insert(WorkspaceMember, {
-        workspaceId: DEFAULT_WORKSPACE_ID,
-        userId: created.id,
-        role: 'owner',
+        let workspaceId: string;
+        if (
+          unclaimed &&
+          !(await em.existsBy(WorkspaceMember, {
+            workspaceId: DEFAULT_WORKSPACE_ID,
+          }))
+        ) {
+          workspaceId = DEFAULT_WORKSPACE_ID;
+          if (dto.workspaceName) {
+            await em.update(Workspace, workspaceId, {
+              name: dto.workspaceName,
+            });
+          }
+        } else {
+          const workspace = await em.save(
+            em.create(Workspace, {
+              name: dto.workspaceName ?? `${dto.name}'s workspace`,
+            }),
+          );
+          workspaceId = workspace.id;
+        }
+        await em.insert(WorkspaceMember, {
+          workspaceId,
+          userId: created.id,
+          role: 'owner',
+        });
+        return created;
       });
-      return created;
-    });
+    } catch (err) {
+      // Lost a race with a sign-up for the same email.
+      if (
+        (err as { driverError?: { code?: string } }).driverError?.code ===
+        '23505'
+      ) {
+        throw new ConflictException(
+          'This email is already registered; log in instead',
+        );
+      }
+      throw err;
+    }
     return this.startSession(user);
   }
 

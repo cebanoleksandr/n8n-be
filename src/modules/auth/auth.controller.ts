@@ -28,8 +28,8 @@ import {
   loginSchema,
   MeDto,
   SessionDto,
-  SetupDto,
-  setupSchema,
+  RegisterDto,
+  registerSchema,
 } from './auth.dto.js';
 import { AuthService, type Session } from './auth.service.js';
 
@@ -53,21 +53,20 @@ export class AuthController {
       config.get('NODE_ENV', { infer: true }) === 'production';
   }
 
+  /** Open sign-up: creates the account and a workspace owned by it. */
   @Public()
-  @Get('setup')
-  async setupStatus(): Promise<{ needsSetup: boolean }> {
-    return { needsSetup: await this.auth.needsSetup() };
-  }
-
-  @Public()
-  @Post('setup')
-  @ApiBody({ type: SetupDto })
+  @Post('register')
+  @ApiBody({ type: RegisterDto })
   @ApiOkResponse({ type: SessionDto })
-  async setup(
-    @Body(new ZodValidationPipe(setupSchema)) dto: SetupDto,
+  async register(
+    @Body(new ZodValidationPipe(registerSchema)) dto: RegisterDto,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<SessionDto> {
-    return this.respond(res, await this.auth.setup(dto));
+    return this.respond(
+      res,
+      await this.auth.register(dto, req.ip ?? 'unknown'),
+    );
   }
 
   @Public()

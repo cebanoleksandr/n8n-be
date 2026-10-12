@@ -43,6 +43,8 @@ export const envSchema = z.object({
     .int()
     .positive()
     .default(50 * 1024 * 1024),
+  /** Open sign-up at POST /api/auth/register; false = invitations only. */
+  REGISTRATION_ENABLED: booleanString.default(true),
   /** Signs access tokens. At least 32 random characters: openssl rand -base64 48 */
   JWT_SECRET: z.string().min(32, 'must be at least 32 characters'),
   ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().min(60).default(900),

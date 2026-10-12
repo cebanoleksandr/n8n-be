@@ -3,6 +3,7 @@ import { io } from 'socket.io-client';
 import type { Response } from 'supertest';
 import { DataSource } from 'typeorm';
 import { User } from '../src/modules/auth/user.entity.js';
+import { DEFAULT_WORKSPACE_ID } from '../src/modules/workspaces/default-workspace.js';
 import { WorkspaceMember } from '../src/modules/workspaces/workspace-member.entity.js';
 import { Workspace } from '../src/modules/workspaces/workspace.entity.js';
 import { createTestApp, TEST_PASSWORD, type TestApp } from './test-app.js';
@@ -44,9 +45,8 @@ describe('Auth (e2e)', () => {
       await t.as(forged).get('/api/workflows').expect(401);
     });
 
-    it('keeps health, setup status and webhooks public', async () => {
+    it('keeps health and webhooks public', async () => {
       await t.anon().get('/api/health').expect(200);
-      await t.anon().get('/api/auth/setup').expect(200);
       await t.anon().post(`/webhook/nothing-${randomUUID()}`).expect(404);
     });
   });
@@ -363,43 +363,103 @@ describe('Auth (e2e)', () => {
     });
   });
 
-  // Last: it empties the users table to exercise first-run setup.
-  describe('first-run setup', () => {
-    it('creates the first owner once', async () => {
-      const db = t.app.get(DataSource);
-      await db.query('TRUNCATE users CASCADE');
-      expect((await t.anon().get('/api/auth/setup').expect(200)).body).toEqual({
-        needsSetup: true,
-      });
+  describe('registration', () => {
+    const register = (body: object) =>
+      t.anon().post('/api/auth/register').send(body);
 
-      const setup = await t
-        .anon()
-        .post('/api/auth/setup')
-        .send({
-          email: 'Owner@Example.com',
-          name: 'Owner',
-          password: 'owner-password',
-        })
-        .expect(201);
-      expect(setup.body.user.email).toBe('owner@example.com');
+    it('creates an account that owns its own workspace', async () => {
+      const email = `New.User-${randomUUID()}@Example.com`;
+      const res = await register({
+        email,
+        name: 'New User',
+        password: 'new-user-password',
+        workspaceName: 'Acme',
+      }).expect(201);
+      expect(res.body.user.email).toBe(email.toLowerCase());
+      expect(res.headers['set-cookie']).toBeDefined();
+
       const me = await t
-        .as(setup.body.accessToken)
+        .as(res.body.accessToken)
         .get('/api/auth/me')
         .expect(200);
       expect(me.body.workspaces).toEqual([
-        expect.objectContaining({ role: 'owner' }),
+        expect.objectContaining({ workspaceName: 'Acme', role: 'owner' }),
       ]);
 
+      // Fresh workspace: empty, and the default workspace's data is invisible.
+      const visible = await t
+        .as(res.body.accessToken)
+        .get('/api/workflows')
+        .expect(200);
+      expect(visible.body.total).toBe(0);
+      const mine = await t
+        .as(res.body.accessToken)
+        .post('/api/workflows')
+        .send({ name: 'Private' })
+        .expect(201);
+      await t.api().get(`/api/workflows/${mine.body.id}`).expect(404);
+
+      // Can log in with the new password.
       await t
         .anon()
-        .post('/api/auth/setup')
-        .send({
-          email: 'second@example.com',
-          name: 'Second',
-          password: 'second-password',
-        })
-        .expect(409);
-      expect(await db.getRepository(User).count()).toBe(1);
+        .post('/api/auth/login')
+        .send({ email, password: 'new-user-password' })
+        .expect(200);
+    });
+
+    it('rejects taken emails and invalid input', async () => {
+      const taken = await register({
+        email: t.owner.email,
+        name: 'Dup',
+        password: 'whatever-123',
+      }).expect(409);
+      expect(taken.body.message).toContain('already registered');
+
+      const invalid = await register({
+        email: 'not-an-email',
+        name: '',
+        password: 'short',
+      }).expect(400);
+      expect(
+        invalid.body.issues.map((i: { path: string }) => i.path).sort(),
+      ).toEqual(['email', 'name', 'password']);
+    });
+
+    // Last: it empties the users table.
+    it('gives the very first account the existing default workspace', async () => {
+      const db = t.app.get(DataSource);
+      await db.query('TRUNCATE users CASCADE');
+
+      const first = await register({
+        email: `first-${randomUUID()}@example.com`,
+        name: 'First',
+        password: 'first-password',
+      }).expect(201);
+      const second = await register({
+        email: `second-${randomUUID()}@example.com`,
+        name: 'Second',
+        password: 'second-password',
+      }).expect(201);
+
+      const firstMe = await t
+        .as(first.body.accessToken)
+        .get('/api/auth/me')
+        .expect(200);
+      const secondMe = await t
+        .as(second.body.accessToken)
+        .get('/api/auth/me')
+        .expect(200);
+      expect(firstMe.body.workspaces[0].workspaceId).toBe(DEFAULT_WORKSPACE_ID);
+      expect(secondMe.body.workspaces).toEqual([
+        expect.objectContaining({
+          workspaceName: "Second's workspace",
+          role: 'owner',
+        }),
+      ]);
+      expect(secondMe.body.workspaces[0].workspaceId).not.toBe(
+        DEFAULT_WORKSPACE_ID,
+      );
+      expect(await db.getRepository(User).count()).toBe(2);
     });
   });
 });
