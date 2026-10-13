@@ -66,6 +66,56 @@ describe('Workflows & executions (e2e)', () => {
     );
   });
 
+  it('searches and sorts the workflow list', async () => {
+    // Other specs share the workspace: a unique prefix isolates these.
+    const tag = `srch${Date.now()}`;
+    await t.createWorkflow(`${tag} beta`);
+    await t.createWorkflow(`${tag} Alpha`);
+    await t.createWorkflow(`${tag} gamma_1`);
+    await t.createWorkflow(`${tag} gamma%1`);
+
+    const names = async (query: string) => {
+      const res = await api().get(`/api/workflows?${query}`).expect(200);
+      return {
+        total: res.body.total as number,
+        names: (res.body.items as { name: string }[]).map((w) => w.name),
+      };
+    };
+
+    expect(await names(`search=${tag}&sort=name:asc`)).toEqual({
+      total: 4,
+      names: [
+        `${tag} Alpha`,
+        `${tag} beta`,
+        `${tag} gamma%1`,
+        `${tag} gamma_1`,
+      ],
+    });
+    expect((await names(`search=${tag}&sort=name:desc`)).names[0]).toBe(
+      `${tag} gamma_1`,
+    );
+    // Newest first, by creation.
+    expect((await names(`search=${tag}&sort=createdAt:desc`)).names[0]).toBe(
+      `${tag} gamma%1`,
+    );
+    // Case-insensitive; % and _ match only themselves.
+    expect((await names(`search=${tag.toUpperCase()}%20ALPHA`)).names).toEqual([
+      `${tag} Alpha`,
+    ]);
+    expect(
+      (await names(`search=${encodeURIComponent(`${tag} gamma_`)}`)).names,
+    ).toEqual([`${tag} gamma_1`]);
+    expect(
+      (await names(`search=${encodeURIComponent(`${tag} gamma%`)}`)).names,
+    ).toEqual([`${tag} gamma%1`]);
+    // Paging keeps the filter.
+    expect(await names(`search=${tag}&sort=name:asc&limit=2&offset=2`)).toEqual(
+      { total: 4, names: [`${tag} gamma%1`, `${tag} gamma_1`] },
+    );
+
+    await api().get('/api/workflows?sort=bogus').expect(400);
+  });
+
   it('rejects invalid graphs', async () => {
     await api().post('/api/workflows').send({ name: '' }).expect(400);
     const res = await api()
@@ -152,6 +202,8 @@ describe('Workflows & executions (e2e)', () => {
       .expect(200);
     expect(list.body.total).toBe(1);
     expect(list.body.items[0]).not.toHaveProperty('steps');
+    expect(list.body.items[0].workflowName).toBe('Greeter v2');
+    expect(fetched.body.workflowName).toBe('Greeter v2');
   });
 
   it('records a failed run when the workflow has no trigger', async () => {
@@ -168,7 +220,11 @@ describe('Workflows & executions (e2e)', () => {
   it('queues a run and returns 202 without wait', async () => {
     const id = await t.createWorkflow('Queued', graph);
     const res = await api().post(`/api/workflows/${id}/run`).expect(202);
-    expect(res.body).toMatchObject({ status: 'queued', startedAt: null });
+    expect(res.body).toMatchObject({
+      status: 'queued',
+      startedAt: null,
+      workflowName: 'Queued',
+    });
     expect(res.body).not.toHaveProperty('steps');
   });
 

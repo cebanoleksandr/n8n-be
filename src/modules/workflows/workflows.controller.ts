@@ -16,16 +16,14 @@ import {
   ApiOkResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import {
-  type Page,
-  PaginationQuery,
-  paginationSchema,
-} from '../../common/pagination.js';
+import type { Page } from '../../common/pagination.js';
 import { ZodValidationPipe } from '../../common/zod-validation.pipe.js';
 import {
   CreateWorkflowDto,
   createWorkflowSchema,
   importWorkflowSchema,
+  ListWorkflowsQuery,
+  listWorkflowsSchema,
   type WorkflowImport,
   UpdateWorkflowDto,
   updateWorkflowSchema,
@@ -46,7 +44,8 @@ export class WorkflowsController {
   @Get()
   list(
     @Auth() auth: AuthContext,
-    @Query(new ZodValidationPipe(paginationSchema)) query: PaginationQuery,
+    @Query(new ZodValidationPipe(listWorkflowsSchema))
+    query: ListWorkflowsQuery,
   ): Promise<Page<WorkflowSummaryDto>> {
     return this.service.list(auth.workspaceId, query);
   }

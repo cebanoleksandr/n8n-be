@@ -88,6 +88,7 @@ export class ExecutionErrorDto {
 export class ExecutionSummaryDto {
   @ApiProperty() id: string;
   @ApiProperty() workflowId: string;
+  @ApiProperty() workflowName: string;
   @ApiProperty() workflowVersionId: string;
   @ApiProperty({ enum: STATUSES }) status: ExecutionStatus;
   @ApiProperty({ enum: EXECUTION_MODES }) mode: ExecutionMode;

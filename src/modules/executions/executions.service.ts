@@ -133,6 +133,8 @@ export class ExecutionsService {
         throw new ServiceUnavailableException('Execution queue is unavailable');
       }
     }
+    // For toSummary(); not persisted again.
+    execution.workflow = workflow;
     return execution;
   }
 
@@ -297,24 +299,34 @@ export class ExecutionsService {
     workspaceId: string,
     query: ListExecutionsQuery,
   ): Promise<Page<ExecutionSummaryDto>> {
-    const [items, total] = await this.executions.findAndCount({
-      where: {
+    const builder = this.withWorkflowName().where(
+      'e.workspaceId = :workspaceId',
+      {
         workspaceId,
-        ...(query.workflowId && { workflowId: query.workflowId }),
-        ...(query.status && { status: query.status }),
       },
-      order: { createdAt: 'DESC' },
-      take: query.limit,
-      skip: query.offset,
-    });
+    );
+    if (query.workflowId) {
+      builder.andWhere('e.workflowId = :workflowId', {
+        workflowId: query.workflowId,
+      });
+    }
+    if (query.status) {
+      builder.andWhere('e.status = :status', { status: query.status });
+    }
+    const [items, total] = await builder
+      .orderBy('e.createdAt', 'DESC')
+      // Ties would otherwise reorder between pages.
+      .addOrderBy('e.id', 'DESC')
+      .offset(query.offset)
+      .limit(query.limit)
+      .getManyAndCount();
     return { items: items.map(toSummary), total };
   }
 
   async get(workspaceId: string, id: string): Promise<ExecutionDto> {
-    const execution = await this.executions.findOneBy({
-      id,
-      workspaceId,
-    });
+    const execution = await this.withWorkflowName()
+      .where('e.id = :id AND e.workspaceId = :workspaceId', { id, workspaceId })
+      .getOne();
     if (!execution) throw new NotFoundException(`Execution ${id} not found`);
     const steps = await this.steps.find({
       where: { executionId: id },
@@ -322,12 +334,22 @@ export class ExecutionsService {
     });
     return { ...toSummary(execution), steps: steps.map(toStepDto) };
   }
+
+  /** Executions with only the name of their workflow joined, for toSummary(). */
+  private withWorkflowName() {
+    return this.executions
+      .createQueryBuilder('e')
+      .leftJoin('e.workflow', 'w')
+      .addSelect(['w.id', 'w.name']);
+  }
 }
 
 export function toSummary(e: Execution): ExecutionSummaryDto {
   return {
     id: e.id,
     workflowId: e.workflowId,
+    // Loaded by list(), get() and start(); a workflow outlives its executions.
+    workflowName: e.workflow?.name ?? '',
     workflowVersionId: e.workflowVersionId,
     status: e.status,
     mode: e.mode,

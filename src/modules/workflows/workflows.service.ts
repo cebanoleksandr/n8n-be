@@ -10,7 +10,7 @@ import { DataSource, type EntityManager, In, Repository } from 'typeorm';
 import { EMPTY_GRAPH, validateGraph } from '../../engine/graph.js';
 import { NodeRegistry } from '../../engine/node-registry.js';
 import type { WorkflowGraph } from '../../engine/types.js';
-import type { Page, Pagination } from '../../common/pagination.js';
+import type { Page } from '../../common/pagination.js';
 import type { Env } from '../../config/env.js';
 import { Credential } from '../credentials/credential.entity.js';
 import { TriggersService } from '../triggers/triggers.service.js';
@@ -18,6 +18,7 @@ import { WorkflowVersion } from './workflow-version.entity.js';
 import { Workflow, type WorkflowSettings } from './workflow.entity.js';
 import {
   EXPORT_FORMAT,
+  type ListWorkflowsOptions,
   type WorkflowExport,
   type WorkflowImport,
 } from './workflows.dto.js';
@@ -44,14 +45,35 @@ export class WorkflowsService {
 
   async list(
     workspaceId: string,
-    { limit, offset }: Pagination,
+    { limit, offset, search, sort }: ListWorkflowsOptions,
   ): Promise<Page<WorkflowSummaryDto>> {
-    const [items, total] = await this.workflows.findAndCount({
-      where: { workspaceId },
-      order: { updatedAt: 'DESC' },
-      take: limit,
-      skip: offset,
-    });
+    const query = this.workflows
+      .createQueryBuilder('w')
+      .where('w.workspaceId = :workspaceId', { workspaceId });
+    if (search) {
+      query.andWhere(`w.name ILIKE :search ESCAPE '\\'`, {
+        search: `%${escapeLike(search)}%`,
+      });
+    }
+
+    const [field, direction] = sort.split(':') as [string, string];
+    const order = direction === 'asc' ? 'ASC' : 'DESC';
+    if (field === 'name') {
+      // Case-insensitive, whatever the database collation is.
+      query.orderBy('LOWER(w.name)', order);
+    } else {
+      query.orderBy(
+        field === 'createdAt' ? 'w.createdAt' : 'w.updatedAt',
+        order,
+      );
+    }
+    // Ties would otherwise reorder between pages.
+    query.addOrderBy('w.id', 'ASC');
+
+    const [items, total] = await query
+      .offset(offset)
+      .limit(limit)
+      .getManyAndCount();
     return { items: items.map(toSummary), total };
   }
 
@@ -362,4 +384,9 @@ function toDto(w: Workflow, v: WorkflowVersion): WorkflowDto {
     version: v.version,
     graph: v.graph,
   };
+}
+
+/** Makes % and _ in user input match literally in a LIKE pattern. */
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, '\\$&');
 }

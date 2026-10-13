@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { z } from 'zod';
+import { paginationSchema } from '../../common/pagination.js';
 import { workflowGraphSchema } from '../../engine/graph.js';
 import type { WorkflowGraph } from '../../engine/types.js';
 
@@ -22,6 +23,37 @@ const graphApiProperty = {
     connections: [],
   },
 } as const;
+
+export const WORKFLOW_SORTS = [
+  'updatedAt:desc',
+  'createdAt:desc',
+  'name:asc',
+  'name:desc',
+] as const;
+export type WorkflowSort = (typeof WORKFLOW_SORTS)[number];
+
+export const listWorkflowsSchema = paginationSchema.extend({
+  /** Case-insensitive substring of the name; blank means no filter. */
+  search: z
+    .string()
+    .trim()
+    .max(128)
+    .optional()
+    .transform((v) => v || undefined),
+  sort: z.enum(WORKFLOW_SORTS).default('updatedAt:desc'),
+});
+export type ListWorkflowsOptions = z.infer<typeof listWorkflowsSchema>;
+
+export class ListWorkflowsQuery implements ListWorkflowsOptions {
+  @ApiPropertyOptional({ description: 'Case-insensitive part of the name' })
+  search: string | undefined;
+  @ApiPropertyOptional({ enum: WORKFLOW_SORTS, default: 'updatedAt:desc' })
+  sort: WorkflowSort;
+  @ApiPropertyOptional({ minimum: 1, maximum: 100, default: 20 })
+  limit: number;
+  @ApiPropertyOptional({ minimum: 0, default: 0 })
+  offset: number;
+}
 
 export const createWorkflowSchema = z.object({
   name: z.string().trim().min(1).max(128),
