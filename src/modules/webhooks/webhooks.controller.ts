@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Delete,
+  Get,
   HttpCode,
   Module,
   Param,
@@ -17,9 +18,12 @@ import {
   ApiExcludeController,
   ApiTags,
 } from '@nestjs/swagger';
+import { ConfigService } from '@nestjs/config';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
 import { ZodValidationPipe } from '../../common/zod-validation.pipe.js';
+import type { Env } from '../../config/env.js';
+import { publicUrlOf } from '../../config/public-url.js';
 import { normalizeWebhookPath } from '../../nodes/core/webhook.node.js';
 import { Auth, MinRole, Public } from '../auth/auth.decorators.js';
 import type { AuthContext } from '../auth/roles.js';
@@ -140,6 +144,20 @@ export class TestWebhooksController {
   }
 }
 
+/** Base URLs of Webhook nodes, for the editor: <base>/<path>. */
+@ApiTags('webhooks')
+@ApiBearerAuth()
+@Controller('webhooks')
+export class WebhookUrlsController {
+  constructor(private readonly config: ConfigService<Env, true>) {}
+
+  @Get('urls')
+  urls(): { production: string; test: string } {
+    const base = publicUrlOf(this.config);
+    return { production: `${base}/webhook`, test: `${base}/webhook-test` };
+  }
+}
+
 @Module({
   imports: [
     ExecutionsModule,
@@ -151,6 +169,7 @@ export class TestWebhooksController {
     WebhooksController,
     TestWebhookReceiverController,
     TestWebhooksController,
+    WebhookUrlsController,
   ],
   providers: [WebhookDispatcher, TestWebhooksService],
 })

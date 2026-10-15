@@ -171,6 +171,17 @@ describe('Editor features (e2e)', () => {
       expect(executions.body.items[0].mode).toBe('manual');
     });
 
+    it('tells the editor the webhook base URLs', async () => {
+      const res = await t.api().get('/api/webhooks/urls').expect(200);
+      const base = (res.body.production as string).replace(/\/webhook$/, '');
+      expect(base).toMatch(/^https?:\/\/[^/]+/);
+      expect(res.body).toEqual({
+        production: `${base}/webhook`,
+        test: `${base}/webhook-test`,
+      });
+      await t.anon().get('/api/webhooks/urls').expect(401);
+    });
+
     it('can stop listening', async () => {
       const path = `stop-${randomUUID()}`;
       const id = await t.createWorkflow('Stop hook', hookGraph(path));

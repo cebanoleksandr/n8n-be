@@ -10,6 +10,7 @@ import { Redis } from 'ioredis';
 import { createHash, randomBytes } from 'node:crypto';
 import { Repository } from 'typeorm';
 import type { Env } from '../../config/env.js';
+import { publicUrlOf } from '../../config/public-url.js';
 import { NodeOperationError } from '../../engine/errors.js';
 import { OAUTH2_TYPE } from '../../nodes/credentials.js';
 import { redisOptionsFromUrl } from '../../redis/redis-options.js';
@@ -73,10 +74,7 @@ export class OAuth2Service implements OnModuleDestroy {
       ...redisOptionsFromUrl(config.get('REDIS_URL', { infer: true })),
       maxRetriesPerRequest: 3,
     });
-    this.publicUrl = (
-      config.get('PUBLIC_URL', { infer: true }) ??
-      `http://localhost:${config.get('PORT', { infer: true })}`
-    ).replace(/\/+$/, '');
+    this.publicUrl = publicUrlOf(config);
   }
 
   /** Register this at the OAuth provider. */
