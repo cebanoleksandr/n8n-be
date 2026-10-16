@@ -206,6 +206,59 @@ describe('Workflows & executions (e2e)', () => {
     expect(fetched.body.workflowName).toBe('Greeter v2');
   });
 
+  it('versions logic changes, not node moves, and restores old versions', async () => {
+    const id = await t.createWorkflow('Versioned', graph);
+    const save = (g: WorkflowGraph) =>
+      api().put(`/api/workflows/${id}`).send({ graph: g }).expect(200);
+    const versionsOf = async () =>
+      (await api().get(`/api/workflows/${id}/versions`).expect(200)).body as {
+        id: string;
+        version: number;
+      }[];
+
+    // Moving nodes keeps version 1, and the new layout is saved.
+    const moved = {
+      ...graph,
+      nodes: graph.nodes.map((n) => ({
+        ...n,
+        position: [n.position[0] + 50, n.position[1] + 10] as [number, number],
+      })),
+    };
+    expect((await save(moved)).body.version).toBe(1);
+    expect((await versionsOf()).map((v) => v.version)).toEqual([1]);
+    const fetched = await api().get(`/api/workflows/${id}`).expect(200);
+    expect(fetched.body.graph.nodes[0].position).toEqual([50, 10]);
+
+    // A parameter change is a new version.
+    const changed = {
+      ...moved,
+      nodes: moved.nodes.map((n) =>
+        n.id === 'set'
+          ? {
+              ...n,
+              parameters: {
+                assignments: [
+                  { name: 'greeting', type: 'string', value: 'Bye' },
+                ],
+              },
+            }
+          : n,
+      ),
+    };
+    expect((await save(changed)).body.version).toBe(2);
+
+    // Restoring version 1 brings its logic back as version 3.
+    const v1 = (await versionsOf()).find((v) => v.version === 1)!;
+    const restored = await api()
+      .post(`/api/workflows/${id}/versions/${v1.id}/restore`)
+      .expect(200);
+    expect(restored.body.version).toBe(3);
+    expect(restored.body.graph.nodes[2].parameters).toEqual(
+      graph.nodes[2].parameters,
+    );
+    expect((await versionsOf()).map((v) => v.version)).toEqual([3, 2, 1]);
+  });
+
   it('records a failed run when the workflow has no trigger', async () => {
     const id = await t.createWorkflow('Empty');
     const run = await api()

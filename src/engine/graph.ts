@@ -137,3 +137,14 @@ function groupBy<T>(list: T[], key: (item: T) => string): Map<string, T[]> {
   }
   return map;
 }
+
+/**
+ * The graph without node positions: what decides how a workflow runs. Two
+ * graphs that differ only in layout behave the same.
+ */
+export function withoutLayout(graph: WorkflowGraph): unknown {
+  return {
+    ...graph,
+    nodes: graph.nodes.map(({ position: _position, ...node }) => node),
+  };
+}

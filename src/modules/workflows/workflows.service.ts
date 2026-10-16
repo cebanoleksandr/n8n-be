@@ -7,7 +7,11 @@ import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { isDeepStrictEqual } from 'node:util';
 import { DataSource, type EntityManager, In, Repository } from 'typeorm';
-import { EMPTY_GRAPH, validateGraph } from '../../engine/graph.js';
+import {
+  EMPTY_GRAPH,
+  validateGraph,
+  withoutLayout,
+} from '../../engine/graph.js';
 import { NodeRegistry } from '../../engine/node-registry.js';
 import type { WorkflowGraph } from '../../engine/types.js';
 import type { Page } from '../../common/pagination.js';
@@ -121,13 +125,24 @@ export class WorkflowsService {
       let version = await this.currentVersion(workflow, em);
       const graphChanged =
         dto.graph !== undefined && !isDeepStrictEqual(dto.graph, version.graph);
-      if (graphChanged) {
+      // A new version only when the workflow would run differently. Moving
+      // nodes (the editor autosaves every drag) updates the current one.
+      const logicChanged =
+        graphChanged &&
+        !isDeepStrictEqual(
+          withoutLayout(dto.graph!),
+          withoutLayout(version.graph),
+        );
+      if (logicChanged) {
         version = await this.addVersion(
           em,
           workflow,
           version.version + 1,
           dto.graph!,
         );
+      } else if (graphChanged) {
+        version.graph = dto.graph!;
+        await em.save(version);
       }
       if (dto.name !== undefined) workflow.name = dto.name;
       if (dto.pinData) workflow.pinData = dto.pinData;
@@ -142,7 +157,7 @@ export class WorkflowsService {
         dto.active !== undefined && dto.active !== workflow.active;
       if (dto.active !== undefined) workflow.active = dto.active;
       await em.save(workflow);
-      if (activeChanged || (graphChanged && workflow.active)) {
+      if (activeChanged || (logicChanged && workflow.active)) {
         await this.triggers.sync(em, workflow, version.graph);
       }
       return toDto(workflow, version);
