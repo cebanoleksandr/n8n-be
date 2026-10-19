@@ -14,7 +14,7 @@ npm run start:dev                 # APP_ROLE=all: API + worker in one process; m
 
 - API: http://localhost:3000/api
 - Sign up with `POST /api/auth/register { email, name, password, workspaceName? }`, or from the frontend
-- Swagger UI: http://localhost:3000/docs (OpenAPI JSON at `/docs/openapi.json`; the frontend generates its types from it)
+- Swagger UI: http://localhost:3000/docs (OpenAPI JSON at `/docs/openapi.json`)
 - Webhooks: http://localhost:3000/webhook/&lt;path&gt;
 - WebSocket: socket.io namespace `/executions`
 
@@ -52,7 +52,7 @@ BullMQ job scheduler (cron) ─┘                                              
 ## Authentication
 
 - **Access token**: a JWT (HS256, 15 min, `ACCESS_TOKEN_TTL_SECONDS`) sent as `Authorization: Bearer <token>`.
-- **Refresh token**: an opaque random token in the httpOnly cookie `flow_refresh` (path `/api/auth`, SameSite=Lax, Secure in production). Only its SHA-256 is stored. `POST /api/auth/refresh` rotates it, and reusing an already-rotated token revokes every session of that login (theft detection). Logout and password change revoke sessions too.
+- **Refresh token**: an opaque random token in the httpOnly cookie `flow_refresh` (path `/api/auth`). With `COOKIE_SAME_SITE=lax` (default, frontend on the same site) it is `SameSite=Lax`, Secure in production. With `none` (frontend on another site, e.g. GitHub Pages) it is `Secure; Partitioned; SameSite=None`. Only its SHA-256 is stored. `POST /api/auth/refresh` rotates it, and reusing an already-rotated token revokes every session of that login (theft detection). Logout and password change revoke sessions too.
 - **Passwords** are hashed with scrypt (N=2¹⁷, r=8, p=1). Login is rate-limited in Redis to 5 attempts per email and 30 per IP per 15 minutes. Unknown emails take as long as wrong passwords.
 - **Deny by default**: a global guard requires a token and workspace membership on every route unless it is marked `@Public()` (register, login, refresh, invitations, health, webhooks) or `@UserOnly()` (`/auth/me`, `/auth/password`).
 - **Workspaces and roles**: `viewer` reads, `editor` creates, edits and runs workflows and manages credentials, `admin` manages members and invitations (except admins and owners), and `owner` manages everything. A workspace always keeps at least one owner. A user in several workspaces picks one with the `X-Workspace-Id` header. All data access is scoped to that workspace, so another workspace's ids return 404.
@@ -149,6 +149,7 @@ All `/api/*` routes need `Authorization: Bearer <token>` except register, login,
 | GET, PUT, DELETE | `/api/credentials/:id` | Read (no secrets; OAuth2: `oauth2.connected`) / update (merge) / delete |
 | GET | `/api/credentials/:id/oauth2/auth-url` | Start connecting an OAuth2 credential |
 | GET | `/api/oauth2/redirect-uri`, `/api/oauth2/callback` | Redirect URI to register / provider callback (public) |
+| GET | `/api/webhooks/urls` | Base URLs of production and test webhooks (from `PUBLIC_URL`), for showing them in the editor |
 | ANY | `/webhook/<path>` | Webhook triggers of active workflows |
 | GET | `/api/health`, `/api/health/ready` | Liveness / readiness (DB, Redis, S3) |
 
