@@ -1,0 +1,65 @@
+# Render Blueprint (free plan): Dashboard → New → Blueprint → this repository.
+# Postgres is Neon and object storage an external S3 bucket (see README,
+# "Deploying to Render"); their settings are asked for when the Blueprint is created.
+services:
+  - type: web
+    name: flow-api
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: '3000'
+      # The free plan has no background workers: API and worker in one process.
+      - key: APP_ROLE
+        value: all
+      # Free instances have 512 MB of memory.
+      - key: WORKER_CONCURRENCY
+        value: '2'
+      - key: TRUST_PROXY
+        value: 'true'
+      # The frontend is on GitHub Pages, another site than onrender.com.
+      - key: COOKIE_SAME_SITE
+        value: none
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: flow-redis
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      # Neon connection string (direct, not -pooler), with ?sslmode=require
+      - key: DATABASE_URL
+        sync: false
+      # openssl rand -base64 32. Keep a copy: losing it makes stored credentials unreadable.
+      - key: ENCRYPTION_KEY
+        sync: false
+      # https://<this service>.onrender.com
+      - key: PUBLIC_URL
+        sync: false
+      # https://<github user>.github.io (an origin: no path)
+      - key: CORS_ORIGINS
+        sync: false
+      - key: S3_ENDPOINT
+        sync: false
+      - key: S3_REGION
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ACCESS_KEY
+        sync: false
+      - key: S3_SECRET_KEY
+        sync: false
+
+  # Redis for BullMQ and realtime events. Free: 25 MB, not persisted.
+  - type: keyvalue
+    name: flow-redis
+    plan: free
+    region: frankfurt
+    # BullMQ must never have its keys evicted.
+    maxmemoryPolicy: noeviction
+    # Reachable only from Render services in the same region.
+    ipAllowList: []

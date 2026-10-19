@@ -66,6 +66,11 @@ export const envSchema = z.object({
             ? Number(v)
             : v,
     ),
+  /**
+   * SameSite of the refresh cookie: 'lax' when the frontend shares the API's
+   * site, 'none' when it is on another one (GitHub Pages + Render).
+   */
+  COOKIE_SAME_SITE: z.enum(['lax', 'none']).default('lax'),
   CORS_ORIGINS: z
     .string()
     .default('http://localhost:5173')

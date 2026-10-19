@@ -26,6 +26,10 @@ docker compose --profile app up --build -d   # api on :3000 (APP_PORT) + worker,
 
 One image (`Dockerfile`) serves both roles; only `api` runs migrations. `GET /api/health` is liveness, and `GET /api/health/ready` checks Postgres, Redis and S3 (503 when one is down). Behind a reverse proxy set `TRUST_PROXY` (for example `1` or `loopback,10.0.0.0/8`), otherwise login rate limiting sees the proxy's IP. CI (`.github/workflows/ci.yml`) runs lint, type check, unit and e2e tests, and builds the image. It needs npm 12, see `packageManager`.
 
+## Deploying to Render
+
+`render.yaml` is a Render Blueprint for the free plan: one web service from the `Dockerfile` with `APP_ROLE=all` (free plans have no background workers), and a Key Value instance for Redis with `noeviction`. Postgres comes from Neon and files from an S3-compatible bucket. With the frontend on GitHub Pages (another site), it sets `COOKIE_SAME_SITE=none`, so the refresh cookie is sent cross-site as `Secure; Partitioned; SameSite=None`. Step-by-step setup and the free plan limits are in the frontend's README, "Deployment".
+
 ## Process roles
 
 One codebase, selected by `APP_ROLE`:

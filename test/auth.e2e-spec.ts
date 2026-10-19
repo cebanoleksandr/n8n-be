@@ -132,6 +132,7 @@ describe('Auth (e2e)', () => {
       expect(setCookie).toMatch(/HttpOnly/);
       expect(setCookie).toMatch(/Path=\/api\/auth/);
       expect(setCookie).toMatch(/SameSite=Lax/);
+      expect(setCookie).not.toMatch(/Partitioned/);
       await t.as(login.body.accessToken).get('/api/workflows').expect(200);
 
       const first = refreshCookie(login);

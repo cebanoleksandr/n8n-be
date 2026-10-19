@@ -15,7 +15,7 @@ import {
   ApiOkResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import type { Request, Response } from 'express';
+import type { CookieOptions, Request, Response } from 'express';
 import { ZodValidationPipe } from '../../common/zod-validation.pipe.js';
 import type { Env } from '../../config/env.js';
 import { CurrentUserId, Public, UserOnly } from './auth.decorators.js';
@@ -32,25 +32,26 @@ import {
   registerSchema,
 } from './auth.dto.js';
 import { AuthService, type Session } from './auth.service.js';
+import { REFRESH_COOKIE, refreshCookieOptions } from './refresh-cookie.js';
 
 /**
  * The refresh token lives in an httpOnly cookie scoped to /api/auth, so page
  * scripts never see it; the short-lived access token is returned in the body.
  */
-const REFRESH_COOKIE = 'flow_refresh';
-const COOKIE_PATH = '/api/auth';
 
 @ApiTags('auth')
 @Controller('auth')
 export class AuthController {
-  private readonly secureCookies: boolean;
+  private readonly cookie: CookieOptions;
 
   constructor(
     private readonly auth: AuthService,
     config: ConfigService<Env, true>,
   ) {
-    this.secureCookies =
-      config.get('NODE_ENV', { infer: true }) === 'production';
+    this.cookie = refreshCookieOptions(
+      config.get('NODE_ENV', { infer: true }) === 'production',
+      config.get('COOKIE_SAME_SITE', { infer: true }),
+    );
   }
 
   /** Open sign-up: creates the account and a workspace owned by it. */
@@ -158,10 +159,7 @@ export class AuthController {
 
   private respond(res: Response, session: Session): SessionDto {
     res.cookie(REFRESH_COOKIE, session.refreshToken, {
-      httpOnly: true,
-      secure: this.secureCookies,
-      sameSite: 'lax',
-      path: COOKIE_PATH,
+      ...this.cookie,
       expires: session.refreshExpiresAt,
     });
     return {
@@ -172,7 +170,7 @@ export class AuthController {
   }
 
   private clearCookie(res: Response): void {
-    res.clearCookie(REFRESH_COOKIE, { path: COOKIE_PATH });
+    res.clearCookie(REFRESH_COOKIE, this.cookie);
   }
 }
 
